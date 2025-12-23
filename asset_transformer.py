@@ -3,12 +3,13 @@ import numpy as np
 from PIL import Image
 from psd_tools import PSDImage
 import os
-import logging
 from typing import Tuple, List, Dict
+import logging
 
-class AssetTransformer:
-    """Combined asset transformation tool generating all 5 secondary assets."""
-    
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class AssetTransformer:    
     def __init__(self, input_path: str, output_dir: str):
         self.input_path = input_path
         self.output_dir = output_dir
