@@ -207,7 +207,7 @@ class AssetTransformer:
         best_score = -1
         best_x = 0
         best_y = 0
-        
+
         for y in range(0, src_h - crop_size + 1, 10):
             for x in range(0, src_w - crop_size + 1, 10):
                 score = importance_map[y:y+crop_size, x:x+crop_size].sum()
