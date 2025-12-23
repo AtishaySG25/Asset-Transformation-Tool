@@ -48,6 +48,21 @@ to maintain visual hierarchy without clipping or padding.
 pip install -r requirements.txt
 
 python main.py \
-  --input input/sample_master.psd \
+  --input input/lady.psd \
   --output output/secondary_assets
+
+## Process Visualization (CV Explainability)
+
+To demonstrate the computer vision methodology, a separate visualization
+script is included.
+
+It generates annotated images showing:
+- Saliency detection
+- Text, logo, and object detection
+- Importance scoring
+- Crop region decisions for different aspect ratios
+
+Run:
+```bash
+python visualize_process.py
 
