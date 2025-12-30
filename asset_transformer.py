@@ -26,14 +26,14 @@ class AssetTransformer:
         else:
             pil_img = Image.open(self.input_path)
             logger.info(f"Loaded image: {pil_img.size}")
-        
+
         # Store in both formats
         self.master_array = np.array(pil_img.convert('RGB'))
         self.master_img = cv2.cvtColor(self.master_array, cv2.COLOR_RGB2BGR)
         
         if self.master_img.shape[:2] != (1080, 1080):
             logger.warning("Resizing master to 1080x1080")
-            self.master_img = cv2.resize(self.master_img, (1080, 1080), interpolation=cv2.INTER_LANCZOS4)
+            self.master_img = cv2.resize(self.master_img, (1080, 1080), interpolation=cv2.INTER_LANCZOS4) # Resize to 1080x1080
             self.master_array = cv2.cvtColor(self.master_img, cv2.COLOR_BGR2RGB)
 
     def compute_saliency_mask(self):
@@ -42,20 +42,20 @@ class AssetTransformer:
         
         # Strong edge detection for text and logos
         edges = cv2.Canny(gray, 80, 160)
-        edges = cv2.dilate(edges, np.ones((7,7), np.uint8), iterations=4)
-        edges = cv2.GaussianBlur(edges, (31, 31), 0)
+        edges = cv2.dilate(edges, np.ones((7,7), np.uint8), iterations=4) #color contrast emphasis
+        edges = cv2.GaussianBlur(edges, (31, 31), 0) # smooth edges
         
-        # Color saliency in Lab space
-        lab = cv2.cvtColor(self.master_img, cv2.COLOR_BGR2Lab)
-        l, a, b = cv2.split(lab)
-        color_sal = cv2.GaussianBlur(a**2 + b**2, (31, 31), 0)
+        # Color saliency in Lab space - how much a color or region in an image stands out to the human eye
+        lab = cv2.cvtColor(self.master_img, cv2.COLOR_BGR2Lab) # Convert to Lab color space
+        l, a, b = cv2.split(lab) 
+        color_sal = cv2.GaussianBlur(a**2 + b**2, (31, 31), 0) # Color distinctiveness
         
         # Combine with emphasis on edges
-        saliency_map = cv2.normalize(edges, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        saliency_map = cv2.normalize(edges, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8) # improve the contrast of an image
         color_map = cv2.normalize(color_sal, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         saliency_map = cv2.addWeighted(saliency_map, 0.8, color_map, 0.2, 0)
         
-        # Threshold and clean up
+        # Threshold and clean up 
         _, binary_mask = cv2.threshold(saliency_map, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, np.ones((20,20), np.uint8))
         binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, np.ones((10,10), np.uint8))
