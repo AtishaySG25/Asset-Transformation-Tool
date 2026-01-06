@@ -46,6 +46,6 @@ Text layers, logos, backgrounds, and other visual elements are classified and pr
 1. Install dependencies:
 ```bash
 pip install psd-tools pillow opencv-python opencv-contrib-python
-python smart_asset_generator.py
+python asset_generator.py
 
 
