@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 # ====================================================
 # CONFIGURATION
 # ====================================================
-INPUT_PSD = "D:/Asset-Transformation-Tool/new_aspect_ratios/input/Axis_Multicap_fund.psd"
-OUTPUT_DIR = "D:/Asset-Transformation-Tool/new_aspect_ratios/output"
+INPUT_PSD = "D:/Datanodes_Assignment/input/Axis_Multicap_fund.psd"
+OUTPUT_DIR = "D:/Datanodes_Assignment/general_approach/hybrid/output_hybrid"
 OUTPUT_FORMAT = "PNG"  # Change to "JPG" if needed
 
 TARGET_SIZES = {
