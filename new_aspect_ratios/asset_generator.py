@@ -177,13 +177,13 @@ def classify_element(element: GraphicElement, psd_size: tuple = None) -> Element
     if 'logo' in name_lower:
         logger.debug(f"✓ Name-based: {element.name} → LOGO")
         return ElementType.LOGO
-    if any(x in name_lower for x in ['cta', 'button', 'invest']):
+    if any(x in name_lower for x in ['cta', 'button']):
         logger.debug(f"✓ Name-based: {element.name} → CTA")
         return ElementType.CTA
     if any(x in name_lower for x in ['graph', 'meter', 'chart', 'riskometer']):
         logger.debug(f"✓ Name-based: {element.name} → GRAPH")
         return ElementType.GRAPH
-    if any(x in name_lower for x in ['text', 'headline', 'copy', 'multicap']):
+    if any(x in name_lower for x in ['text', 'headline', 'copy']):
         logger.debug(f"✓ Name-based: {element.name} → TEXT")
         return ElementType.TEXT
     
@@ -193,7 +193,7 @@ def classify_element(element: GraphicElement, psd_size: tuple = None) -> Element
         logger.info(f"⚡ CV-based: {element.name} → {cv_result.value.upper()}")
         return cv_result
     
-    logger.warning(f"⚠ Unclassified: {element.name} → UNKNOWN")
+    logger.warning(f"Unclassified: {element.name} → UNKNOWN")
     return ElementType.UNKNOWN
 
 
