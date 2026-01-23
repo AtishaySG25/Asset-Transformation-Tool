@@ -198,10 +198,10 @@ def extract_layers(psd):
 # 160x600 – SKYSCRAPER (FIXED VERSION)
 # ====================================================
 def render_160x600(objects, output_path):
-    """Render 160x600 skyscraper with optimized vertical stacking"""
+    """Render 160x600 skyscraper with semantic vertical ordering"""
     W, H = 160, 600
     canvas = Image.new("RGBA", (W, H), (255, 255, 255, 255))
-    padding = 6  # Reduced padding for better space utilization
+    padding = 6
     
     # 1. Background - full canvas
     bg_obj = next((o for o in objects if o["type"] == "background"), None)
@@ -209,60 +209,116 @@ def render_160x600(objects, output_path):
         bg_img = bg_obj["image"].resize((W, H), Image.LANCZOS)
         canvas.paste(bg_img, (0, 0))
     
-    # 2. Categorize foreground elements by priority and type
-    fg = [o for o in objects if o["type"] != "background"]
+    # 2. Categorize elements by semantic type
+    text_objs = [o for o in objects if o["type"] == "text"]
+    logo_objs = [o for o in objects if o["type"] == "logo"]
+    other_objs = [o for o in objects if o["type"] == "other"]
     
-    # Sort by priority (text=3, logo=4, other=1)
-    # This ensures important elements come first
-    fg.sort(key=lambda x: x.get("priority", 0), reverse=True)
+    # 3. Define semantic ordering (top to bottom)
+    ordered_elements = []
     
-    # 3. Calculate total available height and distribute space
-    available_height = H - (padding * 2)
+    # Top section: Text elements (headlines)
+    for txt in text_objs:
+        ordered_elements.append({
+            'obj': txt,
+            'section': 'top',
+            'width_percent': 0.92
+        })
     
-    # Pre-calculate scaled heights to see if everything fits
+    # Middle section: Other elements (CTAs, graphs, app badges, ratings)
+    # Sort other elements by vertical position in original PSD
+    other_objs_sorted = sorted(other_objs, key=lambda x: x.get('bbox', (0, 0, 0, 0))[1] if 'bbox' in x else 0)
+    
+    for other in other_objs_sorted:
+        name_lower = other.get('name', '').lower()
+        # Detect app badges and ratings (should go in middle)
+        if any(x in name_lower for x in ['app', 'store', 'rating', 'star', 'download']):
+            ordered_elements.append({
+                'obj': other,
+                'section': 'middle',
+                'width_percent': 0.85
+            })
+        # CTAs and buttons
+        elif any(x in name_lower for x in ['button', 'cta', 'invest', 'click']):
+            ordered_elements.append({
+                'obj': other,
+                'section': 'middle',
+                'width_percent': 0.88
+            })
+        # Graphs and charts
+        else:
+            ordered_elements.append({
+                'obj': other,
+                'section': 'middle',
+                'width_percent': 0.85
+            })
+    
+    # Bottom section: Logo (anchor to bottom)
+    logo_elem = None
+    if logo_objs:
+        logo_elem = logo_objs[0]
+    
+    # 4. Calculate scaling for non-logo elements
     scaled_elements = []
     total_natural_height = 0
     
-    for obj in fg:
-        img = obj["image"]
-        # Scale to fit width (90% of canvas)
-        target_width = int(W * 0.9)
+    for elem_data in ordered_elements:
+        img = elem_data['obj']['image']
+        target_width = int(W * elem_data['width_percent'])
         scale = target_width / img.width
         scaled_h = int(img.height * scale)
         scaled_w = int(img.width * scale)
         
         scaled_elements.append({
-            'obj': obj,
+            'obj': elem_data['obj'],
             'width': scaled_w,
             'height': scaled_h,
-            'original_img': img
+            'original_img': img,
+            'section': elem_data['section']
         })
         total_natural_height += scaled_h
     
-    # 4. Determine spacing strategy
-    total_padding_needed = padding * (len(scaled_elements) + 1)
+    # 5. Reserve space for logo at bottom
+    logo_height = 0
+    logo_data = None
+    if logo_elem:
+        logo_h = int(H * 0.08)  # 8% of height for logo
+        logo_w = int(logo_elem['image'].width * (logo_h / logo_elem['image'].height))
+        if logo_w > W * 0.5:
+            logo_w = int(W * 0.5)
+            logo_h = int(logo_elem['image'].height * (logo_w / logo_elem['image'].width))
+        logo_height = logo_h + padding
+        logo_data = {
+            'img': logo_elem['image'],
+            'width': logo_w,
+            'height': logo_h
+        }
+    
+    # 6. Calculate available space and spacing
+    available_height = H - (padding * 2) - logo_height
+    total_padding_needed = padding * len(scaled_elements)
     space_needed = total_natural_height + total_padding_needed
     
     if space_needed > available_height:
-        # Need to compress - reduce element sizes proportionally
+        # Compress elements proportionally
         compression_ratio = (available_height - total_padding_needed) / total_natural_height
         for elem in scaled_elements:
             elem['height'] = int(elem['height'] * compression_ratio)
             elem['width'] = int(elem['width'] * compression_ratio)
         dynamic_padding = padding
     else:
-        # Have extra space - distribute it evenly between elements
+        # Distribute extra space
         extra_space = available_height - space_needed
-        num_gaps = len(scaled_elements) + 1
-        dynamic_padding = padding + (extra_space // num_gaps)
+        num_gaps = len(scaled_elements)
+        dynamic_padding = padding + (extra_space // max(num_gaps, 1))
     
-    # 5. Place elements with optimized spacing
-    y = dynamic_padding
+    # 7. Place elements top to bottom
+    y = padding
     
     for elem in scaled_elements:
         if elem['height'] <= 0 or elem['width'] <= 0:
             continue
-            
+        
         # Resize element
         img_resized = elem['original_img'].resize(
             (elem['width'], elem['height']), 
@@ -273,13 +329,23 @@ def render_160x600(objects, output_path):
         x = (W - elem['width']) // 2
         
         # Check if it fits
-        if y + elem['height'] > H - padding:
+        if y + elem['height'] > H - logo_height - padding:
             logger.warning(f"Skipping element - out of vertical space")
             break
         
         # Paste element
         canvas.paste(img_resized, (x, y), img_resized)
         y += elem['height'] + dynamic_padding
+    
+    # 8. Place logo at bottom right
+    if logo_data:
+        logo_img_resized = logo_data['img'].resize(
+            (logo_data['width'], logo_data['height']), 
+            Image.LANCZOS
+        )
+        logo_x = W - logo_data['width'] - padding
+        logo_y = H - logo_data['height'] - padding
+        canvas.paste(logo_img_resized, (logo_x, logo_y), logo_img_resized)
     
     save_image(canvas, output_path)
     logger.info(f"✓ Generated 160x600: {output_path}")
