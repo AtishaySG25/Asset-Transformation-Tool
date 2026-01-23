@@ -1,16 +1,10 @@
 """
-Combined Asset Generator
+Combined Asset Generator - FIXED VERSION
 ------------------------
 Transforms a single 1080x1080 PSD master asset into multiple secondary assets
 using computer vision techniques and layout-aware rendering.
 
-Supported outputs:
-- 160x600 (skyscraper, layer-based vertical stacking)
-- 200x200 (square, saliency-based crop)
-- 300x250 (rectangle, saliency-based crop)
-- 970x90, 728x90, 468x60 (banners, fixed-layout positioning)
-
-Author: Combined production-ready version
+Author: Fixed production-ready version
 """
 
 import os
@@ -29,9 +23,9 @@ logger = logging.getLogger(__name__)
 # ====================================================
 # CONFIGURATION
 # ====================================================
-INPUT_PSD = "D:/Asset-Transformation-Tool/new_aspect_ratios/input/Axis_Multicap_fund.psd"
+INPUT_PSD = "D:/Asset-Transformation-Tool/new_aspect_ratios/input/Axis.psd"
 OUTPUT_DIR = "D:/Asset-Transformation-Tool/new_aspect_ratios/output"
-OUTPUT_FORMAT = "PNG"  # Change to "JPG" if needed
+OUTPUT_FORMAT = "PNG"
 
 TARGET_SIZES = {
     "160x600": (160, 600),
@@ -46,7 +40,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # ====================================================
-# ELEMENT TYPE CLASSIFICATION (FOR BANNERS)
+# ELEMENT TYPE CLASSIFICATION
 # ====================================================
 class ElementType(Enum):
     LOGO = "logo"
@@ -68,126 +62,94 @@ class GraphicElement:
 
 
 def classify_element_generic(element: GraphicElement, psd_size: tuple) -> ElementType:
-    """
-    Generic element classification using computer vision techniques.
-    No hardcoded layer names - works with any PSD.
-    """
+    """Generic element classification using computer vision techniques."""
     img = element.original_image
     w, h = img.size
     psd_w, psd_h = psd_size
     x, y, x2, y2 = element.original_bbox
     
-    # Convert to numpy for analysis
     img_array = np.array(img.convert('RGB'))
-    
-    # ========================================
-    # 1. BACKGROUND DETECTION (Size-based)
-    # ========================================
     area_ratio = (w * h) / (psd_w * psd_h)
-    if area_ratio > 0.85:  # Covers >85% of canvas
+    
+    # Background detection
+    if area_ratio > 0.85:
         return ElementType.BACKGROUND
     
-    # ========================================
-    # 2. LOGO DETECTION
-    # ========================================
+    # Logo detection
     aspect_ratio = w / h if h > 0 else 1
-    
-    # Logos are typically:
-    # - Square-ish (aspect ratio 0.7 to 1.5)
-    # - Small to medium size (5-25% of canvas)
-    # - High contrast / defined edges
     if 0.7 <= aspect_ratio <= 1.5 and 0.05 <= area_ratio <= 0.25:
-        # Check edge density (logos have defined borders)
         gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
         edges = cv2.Canny(gray, 50, 150)
         edge_density = np.sum(edges > 0) / (w * h)
-        
-        if edge_density > 0.02:  # Has defined edges
+        if edge_density > 0.02:
             return ElementType.LOGO
     
-    # ========================================
-    # 3. GRAPH/CHART DETECTION
-    # ========================================
-    # Graphs typically have:
-    # - High color variance (multiple colors)
-    # - Complex shapes
-    # - Medium size
+    # Graph/Chart detection
     if 0.1 <= area_ratio <= 0.5:
-        # Color variance check
         color_std = np.std(img_array, axis=(0, 1)).mean()
-        
-        # Check for circular/arc patterns (common in pie charts, risk meters)
         gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
         circles = cv2.HoughCircles(
             gray, cv2.HOUGH_GRADIENT, dp=1, minDist=20,
             param1=50, param2=30, minRadius=10, maxRadius=min(w, h)//2
         )
-        
         if color_std > 40 or circles is not None:
             return ElementType.GRAPH
     
-    # ========================================
-    # 4. TEXT DETECTION
-    # ========================================
-    # Text typically has:
-    # - Wide aspect ratio (width >> height)
-    # - High horizontal edge density
-    # - Located in upper portion
-    if aspect_ratio > 2.0:  # Wide element
+    # Text detection
+    if aspect_ratio > 2.0:
         gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
         edges = cv2.Canny(gray, 100, 200)
         edge_density = np.sum(edges > 0) / (w * h)
-        
-        # Text has very high edge density
         if edge_density > 0.05:
             return ElementType.TEXT
     
-    # ========================================
-    # 5. POSITIONAL HINTS (Fallback)
-    # ========================================
-    # Top-left elements often logos
+    # Positional hints
     if x < psd_w * 0.3 and y < psd_h * 0.3 and area_ratio < 0.2:
         return ElementType.LOGO
-    
-    # Bottom-right elements often graphs/charts
     if x > psd_w * 0.5 and area_ratio > 0.1:
         return ElementType.GRAPH
-    
-    # Top elements often text
     if y < psd_h * 0.4 and aspect_ratio > 2.5:
         return ElementType.TEXT
     
-    # ========================================
-    # DEFAULT
-    # ========================================
     return ElementType.UNKNOWN
 
 
 def classify_element(element: GraphicElement, psd_size: tuple = None) -> ElementType:
-    """
-    HYBRID APPROACH: Try name-based first, fallback to CV-based.
-    This ensures backward compatibility while adding generic support.
-    """
+    """HYBRID APPROACH: Try name-based first, fallback to CV-based."""
     name_lower = element.name.lower()
     
-    # Try name-based classification first (your working code)
-    if any(x in name_lower for x in ['bg', 'background', 'grid']):
+    # Name-based classification with generic keywords
+    # Background detection
+    if any(x in name_lower for x in ['bg', 'background', 'backdrop']):
         logger.debug(f"✓ Name-based: {element.name} → BACKGROUND")
         return ElementType.BACKGROUND
-    if 'logo' in name_lower:
+    
+    # Logo detection
+    if 'logo' in name_lower or 'brand' in name_lower:
         logger.debug(f"✓ Name-based: {element.name} → LOGO")
         return ElementType.LOGO
-    if any(x in name_lower for x in ['cta', 'button', 'invest']):
+    
+    # CTA/Button detection
+    if any(x in name_lower for x in ['cta', 'button', 'btn', 'action', 'click']):
         logger.debug(f"✓ Name-based: {element.name} → CTA")
         return ElementType.CTA
-    if any(x in name_lower for x in ['graph', 'meter', 'chart', 'riskometer']):
+    
+    # Graph/Chart detection
+    if any(x in name_lower for x in ['graph', 'chart', 'meter', 'gauge', 'diagram', 'plot']):
         logger.debug(f"✓ Name-based: {element.name} → GRAPH")
         return ElementType.GRAPH
-    if any(x in name_lower for x in ['text', 'headline', 'copy', 'multicap']):
+    
+    # Text detection (generic keywords only)
+    if any(x in name_lower for x in ['text', 'headline', 'title', 'heading', 'copy', 'label']):
         logger.debug(f"✓ Name-based: {element.name} → TEXT")
         return ElementType.TEXT
     
-    # If name-based fails and psd_size provided, use CV-based detection
+    # Disclaimer/footer text detection
+    if any(x in name_lower for x in ['disclaimer', 'footer', 'legal', 'note', 'warning']):
+        logger.debug(f"✓ Name-based: {element.name} → TEXT (disclaimer)")
+        return ElementType.TEXT
+    
+    # CV-based fallback - only use if name-based fails
     if psd_size is not None:
         cv_result = classify_element_generic(element, psd_size)
         logger.info(f"⚡ CV-based: {element.name} → {cv_result.value.upper()}")
@@ -198,13 +160,10 @@ def classify_element(element: GraphicElement, psd_size: tuple = None) -> Element
 
 
 # ====================================================
-# PSD LAYER EXTRACTION (FOR 160x600)
+# PSD LAYER EXTRACTION
 # ====================================================
 def extract_layers(psd):
-    """
-    Extract visible PSD layers and classify them semantically.
-    Used by 160x600 rendering.
-    """
+    """Extract visible PSD layers and classify them semantically."""
     objects = []
 
     for layer in psd:
@@ -227,6 +186,7 @@ def extract_layers(psd):
         objects.append({
             "priority": priority,
             "type": obj_type,
+            "name": layer.name,
             "image": img.convert("RGBA")
         })
 
@@ -235,43 +195,98 @@ def extract_layers(psd):
 
 
 # ====================================================
-# 160x600 – SKYSCRAPER (LAYER-BASED VERTICAL STACKING)
+# 160x600 – SKYSCRAPER (FIXED VERSION)
 # ====================================================
 def render_160x600(objects, output_path):
-    """Render 160x600 skyscraper format with vertical stacking"""
+    """Render 160x600 skyscraper with optimized vertical stacking"""
     W, H = 160, 600
     canvas = Image.new("RGBA", (W, H), (255, 255, 255, 255))
-    padding = int(0.04 * W)
-
-    # Background first
-    for obj in objects:
-        if obj["type"] == "background":
-            canvas.paste(obj["image"].resize((W, H), Image.LANCZOS), (0, 0))
-            break
-
-    # Stack foreground elements vertically
+    padding = 6  # Reduced padding for better space utilization
+    
+    # 1. Background - full canvas
+    bg_obj = next((o for o in objects if o["type"] == "background"), None)
+    if bg_obj:
+        bg_img = bg_obj["image"].resize((W, H), Image.LANCZOS)
+        canvas.paste(bg_img, (0, 0))
+    
+    # 2. Categorize foreground elements by priority and type
     fg = [o for o in objects if o["type"] != "background"]
-    y = padding
-
+    
+    # Sort by priority (text=3, logo=4, other=1)
+    # This ensures important elements come first
+    fg.sort(key=lambda x: x.get("priority", 0), reverse=True)
+    
+    # 3. Calculate total available height and distribute space
+    available_height = H - (padding * 2)
+    
+    # Pre-calculate scaled heights to see if everything fits
+    scaled_elements = []
+    total_natural_height = 0
+    
     for obj in fg:
         img = obj["image"]
-        scale = min(W / img.width * 0.9, 1.5)
-        img = img.resize((int(img.width * scale), int(img.height * scale)))
-        x = (W - img.width) // 2
-
-        if y + img.height > H:
+        # Scale to fit width (90% of canvas)
+        target_width = int(W * 0.9)
+        scale = target_width / img.width
+        scaled_h = int(img.height * scale)
+        scaled_w = int(img.width * scale)
+        
+        scaled_elements.append({
+            'obj': obj,
+            'width': scaled_w,
+            'height': scaled_h,
+            'original_img': img
+        })
+        total_natural_height += scaled_h
+    
+    # 4. Determine spacing strategy
+    total_padding_needed = padding * (len(scaled_elements) + 1)
+    space_needed = total_natural_height + total_padding_needed
+    
+    if space_needed > available_height:
+        # Need to compress - reduce element sizes proportionally
+        compression_ratio = (available_height - total_padding_needed) / total_natural_height
+        for elem in scaled_elements:
+            elem['height'] = int(elem['height'] * compression_ratio)
+            elem['width'] = int(elem['width'] * compression_ratio)
+        dynamic_padding = padding
+    else:
+        # Have extra space - distribute it evenly between elements
+        extra_space = available_height - space_needed
+        num_gaps = len(scaled_elements) + 1
+        dynamic_padding = padding + (extra_space // num_gaps)
+    
+    # 5. Place elements with optimized spacing
+    y = dynamic_padding
+    
+    for elem in scaled_elements:
+        if elem['height'] <= 0 or elem['width'] <= 0:
+            continue
+            
+        # Resize element
+        img_resized = elem['original_img'].resize(
+            (elem['width'], elem['height']), 
+            Image.LANCZOS
+        )
+        
+        # Center horizontally
+        x = (W - elem['width']) // 2
+        
+        # Check if it fits
+        if y + elem['height'] > H - padding:
+            logger.warning(f"Skipping element - out of vertical space")
             break
-
-        canvas.paste(img, (x, y), img)
-        y += img.height + padding
-
-    # Save with format
+        
+        # Paste element
+        canvas.paste(img_resized, (x, y), img_resized)
+        y += elem['height'] + dynamic_padding
+    
     save_image(canvas, output_path)
     logger.info(f"✓ Generated 160x600: {output_path}")
 
 
 # ====================================================
-# SALIENCY UTILITIES (FOR 200x200, 300x250)
+# SALIENCY UTILITIES
 # ====================================================
 def load_psd_flat(psd_path):
     """Load PSD as flattened RGB image"""
@@ -306,7 +321,7 @@ def detect_objects(saliency_map, min_area):
 
 
 # ====================================================
-# 200x200 – SQUARE CROP (SALIENCY-BASED)
+# SMART CROP FUNCTIONS
 # ====================================================
 def smart_square_crop(img, boxes, target_size):
     """Intelligently crop to square based on detected objects"""
@@ -327,9 +342,6 @@ def smart_square_crop(img, boxes, target_size):
     return cropped.resize(target_size, Image.LANCZOS)
 
 
-# ====================================================
-# 300x250 – RECTANGLE CROP (SALIENCY-BASED)
-# ====================================================
 def smart_rectangle_crop(img, boxes, target_size):
     """Intelligently crop to rectangle based on detected objects"""
     img_w, img_h = img.size
@@ -350,181 +362,203 @@ def smart_rectangle_crop(img, boxes, target_size):
     else:
         crop_w = img_w
         crop_h = int(crop_w / target_ratio)
-    # Ensure crop stays within valid image bounds
+    
     half_w = crop_w // 2
     half_h = crop_h // 2
 
     cx = max(half_w, min(cx, img_w - half_w))
     cy = max(half_h, min(cy, img_h - half_h))
 
-    cropped = img.crop((
-        cx - half_w,
-        cy - half_h,
-        cx + half_w,
-        cy + half_h
-    ))
+    cropped = img.crop((cx - half_w, cy - half_h, cx + half_w, cy + half_h))
     return cropped.resize(target_size, Image.LANCZOS)
 
 
 # ====================================================
-# BANNER RENDERING (970x90, 728x90, 468x60)
+# BANNER RENDERING (FIXED VERSION)
 # ====================================================
-def reposition_objects_fixed(elements: list[GraphicElement], target_size: tuple):
+def extract_dominant_colors(img, n_colors=2):
+    """Extract dominant colors from an image using K-means clustering."""
+    # Convert to RGB and reshape
+    img_array = np.array(img.convert('RGB'))
+    pixels = img_array.reshape(-1, 3)
+    
+    # Sample pixels for efficiency (use max 10000 pixels)
+    if len(pixels) > 10000:
+        indices = np.random.choice(len(pixels), 10000, replace=False)
+        pixels = pixels[indices]
+    
+    # Remove very dark and very light pixels (likely shadows/highlights)
+    mask = (pixels.sum(axis=1) > 30) & (pixels.sum(axis=1) < 700)
+    pixels = pixels[mask]
+    
+    if len(pixels) == 0:
+        return ['#333333', '#ffffff']  # Fallback
+    
+    # K-means clustering
+    from sklearn.cluster import KMeans
+    kmeans = KMeans(n_clusters=min(n_colors, len(pixels)), random_state=42, n_init=10)
+    kmeans.fit(pixels)
+    
+    # Get colors sorted by frequency
+    colors = kmeans.cluster_centers_.astype(int)
+    
+    # Convert to hex
+    hex_colors = ['#%02x%02x%02x' % tuple(color) for color in colors]
+    return hex_colors
+
+
+def get_contrasting_color(bg_color):
+    """Get contrasting text color (black or white) based on background."""
+    # Remove # if present
+    bg_color = bg_color.lstrip('#')
+    
+    # Convert to RGB
+    r, g, b = int(bg_color[0:2], 16), int(bg_color[2:4], 16), int(bg_color[4:6], 16)
+    
+    # Calculate luminance
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    
+    # Return black for light backgrounds, white for dark
+    return '#000000' if luminance > 0.5 else '#ffffff'
+
+
+def reposition_objects_fixed(elements: list[GraphicElement], target_size: tuple, psd_composite=None):
     """
-    Fixed-layout positioning for banners:
-    - Logo: left-anchored
-    - Graph: right-anchored
-    - CTA: center (dynamically scaled)
+    Fixed-layout positioning for banners - uses ALL visible layers as images.
+    No zone-based logic, just smart scaling and positioning.
     """
     tw, th = target_size
-    # Aggressive padding reduction for smallest banner
-    px = 4 if th <= 60 else int(tw * 0.015)
-
+    padding = max(6, int(tw * 0.008))
+    
+    # Separate elements by type
     bg = next((e for e in elements if e.type == ElementType.BACKGROUND), None)
     logo = next((e for e in elements if e.type == ElementType.LOGO), None)
     graphs = [e for e in elements if e.type == ElementType.GRAPH]
-
-    processed = []
-
-    # 1. Background
-    if bg:
-        bg_img = ImageOps.fit(bg.original_image, (tw, th), Image.Resampling.LANCZOS)
-        processed.append((bg_img, 0, 0))
-
-    # 2. Right Anchor: Graphs
-    right_boundary = tw - px
-    if graphs:
-        gh = int(th * 0.75) if th <= 60 else int(th * 0.85)
-        total_graph_width = 0
-        
-        for g in reversed(graphs):
-            gw = int(g.image.width * (gh / g.image.height))
-            total_graph_width += gw + px
-        
-        # Check if graphs fit, if not, reduce their size
-        max_graph_space = int(tw * 0.35)  # Graphs can't take more than 35% of width
-        if total_graph_width > max_graph_space:
-            scale_factor = max_graph_space / total_graph_width
-            gh = int(gh * scale_factor)
-        
-        for g in reversed(graphs):
-            gw = int(g.image.width * (gh / g.image.height))
-            g_img = g.image.resize((gw, gh), Image.Resampling.LANCZOS)
-            gx = max(px, right_boundary - gw)
-            gy = (th - gh) // 2
-            processed.append((g_img, gx, gy))
-            right_boundary = gx - px
-
-    # 3. Left Column: Text (top) + Logo (bottom)
-    left_boundary = px
-    left_column_width = 0
-
-    # First, position logo at bottom of left column
-    if logo:
-        # Smaller logo - 30% of height, positioned at bottom
-        lh = int(th * 0.30) if th <= 60 else int(th * 0.35)
-        lw = int(logo.image.width * (lh / logo.image.height))
-        
-        # Ensure logo doesn't take too much space
-        max_logo_width = int(tw * 0.30)  # Max 15% of width
-        if lw > max_logo_width:
-            scale_factor = max_logo_width / lw
-            lw = max_logo_width
-            lh = int(lh * scale_factor)
-        
-        l_img = logo.image.resize((lw, lh), Image.Resampling.LANCZOS)
-        lx = px
-        ly = int(th * 0.55)  # Position in lower half
-        processed.append((l_img, lx, ly))
-        left_column_width = lw
-
-    # Add text elements ABOVE logo
     text_elements = [e for e in elements if e.type == ElementType.TEXT]
-    if text_elements and logo:
-        # Stack text above logo in same column
-        text_y = int(th * 0.10)  # Start near top
-        remaining_height = ly - text_y - px  # Space between text and logo
-        
-        for txt_elem in text_elements[:2]:  # Limit to 2 text elements max
-            if remaining_height <= 0:
-                break
-                
-            # Scale text to fit remaining vertical space
-            txt_h = min(int(txt_elem.image.height * 0.4), remaining_height)
-            txt_w = int(txt_elem.image.width * (txt_h / txt_elem.image.height))
-            
-            # Ensure text doesn't exceed left column width
-            max_txt_width = int(tw * 0.20)  # Text can be slightly wider than logo
-            if txt_w > max_txt_width:
-                scale_factor = max_txt_width / txt_w
-                txt_w = max_txt_width
-                txt_h = int(txt_h * scale_factor)
-            
-            if txt_h > 10:  # Only add if reasonably visible
-                txt_img = txt_elem.image.resize((txt_w, txt_h), Image.Resampling.LANCZOS)
-                processed.append((txt_img, px, text_y))
-                text_y += txt_h + int(px * 0.3)
-                remaining_height -= (txt_h + int(px * 0.3))
-                left_column_width = max(left_column_width, txt_w)
-
-    left_boundary = px + left_column_width + px
-
-    # 4. Center: CTA
-    available_w = right_boundary - left_boundary
-
-    if available_w > 20:
-        cta_h = int(th * 0.5)
-        desired_cta_w = int(cta_h * 2.5) if th <= 60 else int(cta_h * 3.2)
-        cta_w = min(desired_cta_w, int(available_w * 0.98))
-
-        gap_center = left_boundary + (available_w // 2)
-        cta_x0 = gap_center - (cta_w // 2)
-        cta_x1 = cta_x0 + cta_w
-
-        if cta_x1 <= cta_x0:
-            cta_x1 = cta_x0 + 1
-
-        cta_y = (th - cta_h) // 2
-        cta_data = {'rect': [cta_x0, cta_y, cta_x1, cta_y + cta_h], 'text': "INVEST NOW"}
-    else:
-        cta_data = None
-
-    # 4. Center: CTA (only if enough space)
-    available_w = right_boundary - left_boundary
-
-    # Minimum space required for CTA to be visible
-    min_cta_width = 80 if th <= 60 else 100
+    cta_elements = [e for e in elements if e.type == ElementType.CTA]
     
-    if available_w > min_cta_width:
-        cta_h = int(th * 0.45) if th <= 60 else int(th * 0.5)
-        desired_cta_w = int(cta_h * 2.5) if th <= 60 else int(cta_h * 3.2)
+    # Separate disclaimer from main text
+    disclaimer_elem = None
+    main_text = []
+    for txt in text_elements:
+        name_lower = txt.name.lower()
+        if any(x in name_lower for x in ['disclaimer', 'footer', 'legal', 'warning', 'note']):
+            disclaimer_elem = txt
+        else:
+            main_text.append(txt)
+    
+    processed = []
+    
+    # 1. Background - full canvas
+    if bg:
+        bg_img = bg.original_image.resize((tw, th), Image.Resampling.LANCZOS)
+        processed.append((bg_img, 0, 0))
+    
+    # 2. Determine available horizontal space and create a flow layout
+    x_cursor = padding
+    y_cursor = padding
+    
+    # Left side: Text elements (takes ~40-50% of width)
+    max_text_width = int(tw * 0.45)
+    
+    for i, txt in enumerate(main_text[:3]):  # Max 3 text elements
+        # Scale text to be readable
+        if i == 0:  # Main headline
+            target_h = int(th * 0.5)  # Bigger
+        else:
+            target_h = int(th * 0.3)  # Smaller secondary text
         
-        # CTA can't take more than 70% of available space
-        max_cta_w = int(available_w * 0.7)
-        cta_w = min(desired_cta_w, max_cta_w)
+        target_w = int(txt.image.width * (target_h / txt.image.height))
         
-        # Ensure minimum width
-        cta_w = max(cta_w, min_cta_width)
+        # Constrain to max width
+        if target_w > max_text_width:
+            target_w = max_text_width
+            target_h = int(txt.image.height * (target_w / txt.image.width))
+        
+        if target_h > 0 and target_w > 0:
+            txt_img = txt.image.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            txt_x = padding
+            txt_y = y_cursor
+            
+            # Ensure it fits vertically
+            if txt_y + target_h <= th - padding:
+                processed.append((txt_img, txt_x, txt_y))
+                y_cursor += target_h + padding
+    
+    # Update x_cursor for next column
+    x_cursor = max_text_width + padding * 2
+    
+    # Middle: CTA elements
+    if cta_elements:
+        cta_y = padding
+        for cta in cta_elements[:2]:  # Max 2 CTAs
+            # Scale CTA to fit
+            cta_h = int(th * 0.4)
+            cta_w = int(cta.image.width * (cta_h / cta.image.height))
+            
+            # Limit width
+            max_cta_w = int(tw * 0.2)
+            if cta_w > max_cta_w:
+                cta_w = max_cta_w
+                cta_h = int(cta.image.height * (cta_w / cta.image.width))
+            
+            if cta_h > 0 and cta_w > 0 and x_cursor + cta_w < tw - padding:
+                cta_img = cta.image.resize((cta_w, cta_h), Image.Resampling.LANCZOS)
+                processed.append((cta_img, x_cursor, cta_y))
+                cta_y += cta_h + padding
+    
+    # Update x_cursor for graphs
+    x_cursor = int(tw * 0.65)
+    
+    # Right side: Graphs
+    if graphs:
+        graph_y = int(th * 0.15)  # Start a bit below top
+        graph_h = int(th * 0.7)
+        
+        for graph in graphs[:3]:  # Max 3 graphs
+            graph_w = int(graph.image.width * (graph_h / graph.image.height))
+            
+            # Ensure fit
+            if x_cursor + graph_w > tw - padding:
+                # Scale down to fit
+                graph_w = tw - x_cursor - padding
+                graph_h = int(graph.image.height * (graph_w / graph.image.width))
+            
+            if graph_h > 0 and graph_w > 0:
+                graph_img = graph.image.resize((graph_w, graph_h), Image.Resampling.LANCZOS)
+                processed.append((graph_img, x_cursor, graph_y))
+                x_cursor += graph_w + padding
+    
+    # Logo: Bottom right corner
+    if logo:
+        logo_h = int(th * 0.25)
+        logo_w = int(logo.image.width * (logo_h / logo.image.height))
+        
+        # Limit size
+        max_logo_w = int(tw * 0.12)
+        if logo_w > max_logo_w:
+            logo_w = max_logo_w
+            logo_h = int(logo.image.height * (logo_w / logo.image.width))
+        
+        if logo_h > 0 and logo_w > 0:
+            logo_img = logo.image.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
+            logo_x = tw - logo_w - padding
+            logo_y = th - logo_h - padding
+            processed.append((logo_img, logo_x, logo_y))
+    
+    # Prepare disclaimer
+    disclaimer_layer = None
+    if disclaimer_elem:
+        disclaimer_layer = {'image': disclaimer_elem.image}
+    
+    return processed, [], disclaimer_layer  # Empty CTA data since we're using actual images
 
-        gap_center = left_boundary + (available_w // 2)
-        cta_x0 = gap_center - (cta_w // 2)
-        cta_x1 = cta_x0 + cta_w
 
-        if cta_x1 <= cta_x0:
-            cta_x1 = cta_x0 + 1
-
-        cta_y = (th - cta_h) // 2
-        cta_data = {'rect': [cta_x0, cta_y, cta_x1, cta_y + cta_h], 'text': "INVEST NOW"}
-    else:
-        # Not enough space - skip CTA
-        cta_data = None
-
-    return processed, cta_data
-
-def render_banner(layers, cta, size, path):
-    """Render banner with fixed layout and dynamic CTA text scaling"""
+def render_banner(layers, cta_list, size, path, disclaimer_layer=None):
+    """Render banner with fixed layout and multiple CTAs"""
     canvas = Image.new("RGBA", size, (255, 255, 255, 255))
     draw = ImageDraw.Draw(canvas)
+    tw, th = size
 
     # 1. Paste foreground layers
     for img, x, y in layers:
@@ -532,40 +566,61 @@ def render_banner(layers, cta, size, path):
             img = img.convert('RGBA')
         canvas.paste(img, (x, y), img)
 
-    # 2. Draw CTA with dynamic text scaling
-    if cta is not None:
-        r = cta['rect']
-        btn_w = r[2] - r[0]
-        btn_h = r[3] - r[1]
+    # 2. Draw CTA buttons
+    if cta_list:
+        for cta in cta_list:
+            r = cta['rect']
+            btn_w = r[2] - r[0]
+            btn_h = r[3] - r[1]
+            
+            bg_color = cta.get('bg_color', '#9f1c55')
+            text_color = cta.get('text_color', 'white')
+            
+            # Draw button body
+            draw.rounded_rectangle([r[0], r[1], r[2], r[3]], radius=6, fill=bg_color)
+            
+            # Dynamic font scaling
+            text_str = cta['text']
+            current_font_size = int(btn_h * 0.4)
+            
+            while current_font_size > 6:
+                try:
+                    font = ImageFont.truetype("arialbd.ttf", current_font_size)
+                except:
+                    font = ImageFont.load_default()
+                
+                bbox = draw.textbbox((0, 0), text_str, font=font)
+                txt_w = bbox[2] - bbox[0]
+                txt_h = bbox[3] - bbox[1]
+                
+                if txt_w < (btn_w - 10):
+                    break
+                current_font_size -= 1
+            
+            # Center and draw text
+            text_x = r[0] + (btn_w - txt_w) // 2
+            text_y = r[1] + (btn_h - txt_h) // 2
+            
+            draw.text((text_x, text_y), text_str, fill=text_color, font=font)
+    
+    # 3. Add disclaimer layer if exists (for wide banners)
+    if disclaimer_layer and tw >= 728:
+        disc_img = disclaimer_layer['image']
+        # Scale to fit width while maintaining aspect ratio
+        disc_h = int(th * 0.12)  # 12% of banner height
+        disc_w = int(disc_img.width * (disc_h / disc_img.height))
+        
+        # If too wide, scale down
+        if disc_w > tw - 20:
+            disc_w = tw - 20
+            disc_h = int(disc_img.height * (disc_w / disc_img.width))
+        
+        disc_resized = disc_img.resize((disc_w, disc_h), Image.Resampling.LANCZOS)
+        disc_x = (tw - disc_w) // 2
+        disc_y = th - disc_h - 2
+        
+        canvas.paste(disc_resized, (disc_x, disc_y), disc_resized)
 
-        # Draw button body
-        draw.rounded_rectangle([r[0], r[1], r[2], r[3]], radius=6, fill="#9f1c55")
-
-        # Dynamic font scaling
-        current_font_size = int(btn_h * 0.5)
-        text_str = cta['text']
-
-        while current_font_size > 8:
-            try:
-                font = ImageFont.truetype("arialbd.ttf", current_font_size)
-            except:
-                font = ImageFont.load_default()
-
-            bbox = draw.textbbox((0, 0), text_str, font=font)
-            txt_w = bbox[2] - bbox[0]
-            txt_h = bbox[3] - bbox[1]
-
-            if txt_w < (btn_w - 8):
-                break
-            current_font_size -= 1
-
-        # Center and draw text
-        text_x = r[0] + (btn_w - txt_w) // 2
-        text_y = r[1] + (btn_h - txt_h) // 2 - 2
-
-        draw.text((text_x, text_y), text_str, fill="white", font=font)
-
-    # Save with format
     save_image(canvas, path)
     logger.info(f"✓ Generated {size[0]}x{size[1]}: {path}")
 
@@ -588,7 +643,7 @@ def save_image(img, path):
 # ====================================================
 def main():
     logger.info("="*60)
-    logger.info("Combined Asset Generator - Starting")
+    logger.info("Combined Asset Generator - FIXED VERSION")
     logger.info("="*60)
 
     # Load PSD
@@ -613,7 +668,7 @@ def main():
         out_path = os.path.join(OUTPUT_DIR, f"{name}{ext}")
 
         if name == "160x600":
-            # Layer-based vertical stacking
+            # Fixed vertical stacking
             render_160x600(objects_160, out_path)
 
         elif name == "200x200":
@@ -634,8 +689,8 @@ def main():
 
         else:
             # Fixed-layout banners (970x90, 728x90, 468x60)
-            layers, cta = reposition_objects_fixed(elements_banner, size)
-            render_banner(layers, cta, size, out_path)
+            layers, cta_list, disclaimer_layer = reposition_objects_fixed(elements_banner, size, flat_img)
+            render_banner(layers, cta_list, size, out_path, disclaimer_layer)
 
     logger.info("="*60)
     logger.info("✓ All assets generated successfully!")
