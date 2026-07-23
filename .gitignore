@@ -1,1 +1,20 @@
-D:\Asset-Transformation-Tool\new_dimensions\Axis Multicap Fund_ Bridge_Nov25_1200 x 1200.psd
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Large binary inputs / generated assets (kept local, not committed)
+input/*.psd
+output/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
