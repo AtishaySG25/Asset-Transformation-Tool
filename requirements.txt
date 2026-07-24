@@ -1,6 +1,0 @@
-# opencv-contrib is required (not plain opencv-python) for cv2.saliency
-opencv-contrib-python==5.0.0.93
-numpy==2.4.6
-pillow==12.3.0
-psd-tools==1.17.4
-scikit-learn==1.9.0

@@ -1,12 +1,11 @@
-# Virtual environments
+# Virtual environments (never commit — cv2.pyd alone is >100MB)
 .venv/
 venv/
 env/
 
-# Python
+# Python caches
 __pycache__/
 *.py[cod]
-*.egg-info/
 .pytest_cache/
 
 # Large binary inputs / generated assets (kept local, not committed)
