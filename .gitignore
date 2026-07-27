@@ -1,1 +1,22 @@
-D:\Asset-Transformation-Tool\new_dimensions\Axis Multicap Fund_ Bridge_Nov25_1200 x 1200.psd
+# Virtual environments (never commit — cv2.pyd alone is >100MB)
+.venv/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Large binary inputs / generated assets (kept local, not committed)
+# Everything under input/ is a local master asset or a view_psd.py layer dump.
+input/
+output/
+# Stray view_psd.py exports written alongside a PSD
+*_composite.png
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

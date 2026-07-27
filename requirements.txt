@@ -1,5 +1,8 @@
-opencv-python
-numpy
-pillow
-psd-tools
-scikit-learn
+# Core dependencies for the adapt asset-transformation tool.
+# opencv-contrib is required (not plain opencv) — it ships the cv2.saliency module.
+opencv-contrib-python==5.0.0.93
+psd-tools==1.17.4
+pillow==12.3.0
+numpy==2.4.6
+# Testing
+pytest>=8
