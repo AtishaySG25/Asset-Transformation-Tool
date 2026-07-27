@@ -9,8 +9,11 @@ __pycache__/
 .pytest_cache/
 
 # Large binary inputs / generated assets (kept local, not committed)
-input/*.psd
+# Everything under input/ is a local master asset or a view_psd.py layer dump.
+input/
 output/
+# Stray view_psd.py exports written alongside a PSD
+*_composite.png
 
 # OS / editor
 .DS_Store

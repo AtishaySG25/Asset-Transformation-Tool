@@ -1,0 +1,214 @@
+# adapt — CV-driven ad asset transformation
+
+Transforms a single **square master ad** (layered PSD or flat JPEG/PNG) into
+several **exact-sized secondary assets**, using computer vision to identify the
+key visual elements and preserve them across very different aspect ratios —
+**without clipping key content and without letterbox padding**.
+
+Built against the Axis Mutual Fund master (`input/Axis.psd`, 1200×1200) and the
+six IAB output sizes:
+
+| Size | Type | Aspect | Strategy |
+|------|------|--------|----------|
+| `200x200` | square | 1.00 | content-aware crop |
+| `300x250` | medium rectangle | 1.20 | content-aware crop |
+| `468x60`  | full banner | 7.80 | element re-layout |
+| `728x90`  | leaderboard | 8.09 | element re-layout |
+| `970x90`  | super-leaderboard | 10.78 | element re-layout |
+| `160x600` | wide skyscraper | 0.27 | element re-layout |
+
+Nothing in the pipeline is keyed to this particular file: roles come from layer
+names, and every layout decision is driven by element **geometry and position**,
+so the tool generalises to other masters (see [Generalisation](#generalisation)).
+
+## Why multiple strategies
+
+Cropping a 1:1 master to 8:1 shows only ~12 % of the image — the logo, headline
+and CTA do not survive. So the pipeline routes each format
+(`adapt/pipeline.py::effective_strategy`) down one of three paths:
+
+* **`crop`** — near-square targets (`200x200`, `300x250`). The whole composite is
+  resized to fill the frame exactly, so every element is kept and there are no
+  side gaps. Aspect change is small, so distortion is minor.
+* **`reflow`** — extreme ratios (banners, skyscraper). A **content-preserving
+  re-layout**: **every** element is kept (nothing dropped, nothing clipped), text
+  is **re-wrapped** to the new width, and elements are re-stacked following the
+  master's own top→bottom reading order.
+* **`photo`** — sources with no discrete foreground elements (a plain photo PSD
+  or a flat JPEG). There is nothing to re-arrange, so *every* format falls back
+  to a **saliency-weighted content-aware crop**, regardless of aspect.
+
+All three paths always emit the **exact** target dimensions — no clipping to a
+smaller canvas, no padding out. This is asserted per-format in `pipeline.run`
+and covered by the test suite.
+
+### Text re-wrapping with CV (no fonts)
+
+The headline "Your Growth Path Across Market Segments" is one wide line in the
+master; in a 160-px-wide skyscraper it must wrap to several lines.
+`adapt/textflow.py` does this **without any font**: it segments the rasterised
+text into word images using **projection profiles** (horizontal projection →
+text lines, vertical projection → words, with an adaptive gap threshold that
+scales with text height), then re-flows the words into a target width.
+
+The original glyph rendering (font, colour, weight) is preserved exactly, and a
+scale cap guarantees no word is ever clipped — text only ever wraps or shrinks.
+Badges, buttons and logos are type-backed too, so they are distinguished by
+their high **ink-fill** ratio and kept as scaled units rather than shredded into
+"words" — again a geometric rule, not a hardcoded name list.
+
+### Staying sharp
+
+Re-layout involves repeated resampling, which softens small text. Two measures
+counteract it: the banner/skyscraper layouts are composed at **2× supersampling**
+and downscaled once (`reflow(..., ss=2)`), and every output gets a final
+**unsharp mask** (`pipeline._sharpen`).
+
+## The approach: Hybrid (layer-aware + OpenCV)
+
+The PSD is cleanly layered with semantically-named groups, so we get element
+**roles and bounding boxes for free** — far more reliable than guessing them from
+a flattened render. OpenCV still does real CV work: saliency + edge/contour
+analysis drive the crop scoring, and provide the **fallback element detector**
+for flat (non-layered) inputs.
+
+Extraction is done per-layer within each layer's own bounding box rather than by
+re-compositing the full 1200×1200 canvas each time — a large speed win.
+
+### The four required CV challenges
+
+1. **Object identification** — `adapt/psd_source.py` extracts each layer group as
+   a tight-cropped RGBA element and classifies it into a role (logo, cta, scheme,
+   headline, subheadline, riskometer, rating, disclaimer). The bundled
+   `footer-logo` group is split so the logo can travel independently of the
+   disclaimer. For flat images, `adapt/saliency.py::detect_objects` uses Canny
+   edges + contour bounding boxes.
+2. **Saliency detection** — `adapt/saliency.py` builds a fused importance map:
+   `cv2.saliency` (spectral-residual, with fine-grained / Laplacian fallbacks) +
+   Canny edge density, boosted by known element boxes weighted by role priority.
+3. **Smart cropping** — `adapt/smartcrop.py` slides a target-aspect window over
+   the importance map (via cumulative sums) and keeps the highest-importance
+   band. When trimming height it applies a top-favouring prior, so the headline
+   and branding survive rather than being sliced off.
+4. **Object re-positioning** — `adapt/reflow.py` re-arranges elements into a
+   vertical stack (skyscraper) or a 2D column packing (banners), driven by each
+   element's original position so the visual hierarchy is preserved.
+
+#### Skyscraper layout (`layout_tall`)
+
+Elements are stacked top→bottom in their original reading order, with a
+**full-bleed background band** inserted at the document position where the
+master's imagery actually sits (found via a saliency-weighted mean row). A global
+size multiplier is solved for so the stack **fills** the canvas height instead of
+leaving dead space, then shrunk to fit if it overflows.
+
+#### Banner layout (`layout_wide`)
+
+1. The base is the sampled background colour, with the background imagery drawn
+   as a **soft-edged central band** (alpha-feathered left and right) so it blends
+   in rather than reading as a pasted-in tile, while text sits on clean space.
+2. Elements are packed into reading-order **columns**; a lower-priority text line
+   directly following a higher-priority one tucks underneath it to form a
+   **title block** (headline + subheadline).
+3. Columns are spread across the full width and vertically centred, shrinking
+   proportionally if they overflow.
+4. A wide, bottom-sitting **logo lock-up** becomes a full-width **footer bar**
+   tinted with the logo's own dominant colour, with the lock-up on its right.
+5. A very wide, bottom-sitting fine-print line (the disclaimer) becomes a
+   **full-width bottom strip**.
+
+Both the footer bar and the disclaimer strip are detected by **shape and
+position** (aspect ratio + vertical placement), never by layer name.
+
+## Generalisation
+
+The tool was validated against four different PSDs — the structured Axis master
+plus three photographic files with no ad structure at all, which correctly route
+to the `photo` path instead of producing a meaningless reflow. Design rules that
+keep it generic:
+
+* **Roles** come from layer-name keywords in one place (`elements.classify`),
+  ordered so that e.g. `app-rating-logo` classifies as a *rating* badge, not a
+  logo.
+* **Layout** decisions use geometry — aspect ratio, centroid position, ink-fill,
+  priority ordering — so no branch depends on a specific file's contents.
+* **Sizes** are all expressed as fractions of the target canvas, so there are no
+  magic pixel constants that only work at one output size.
+* **Degradation** is explicit: a source with no elements takes the `photo` path,
+  and a flat JPEG falls back to contour-based object detection.
+
+## Usage
+
+```bash
+pip install -r requirements.txt
+
+# default: input/Axis.psd -> output/
+python run.py
+# or
+python -m adapt --input input/Axis.psd --output output --no-debug
+```
+
+Outputs land in `output/` as `<w>x<h>.png`. With debug on (default) you also get:
+
+* `output/montage.png` — contact sheet of all six assets
+* `output/debug/elements.png` — detected elements boxed and labelled by role
+* `output/debug/importance.png` — the fused saliency/edge importance heatmap
+
+To inspect a PSD's structure (useful when adding support for a new master):
+
+```bash
+python view_psd.py input/Axis.psd --layers
+```
+
+## Project layout
+
+```
+adapt/
+  __main__.py     argparse CLI (python -m adapt)
+  formats.py      target sizes + aspect-based strategy router
+  elements.py     Element model, role classification, hierarchy priority
+  psd_source.py   PSD layer extraction  (+ flat-image CV fallback)
+  saliency.py     OpenCV saliency, edge/contour detection, importance map
+  smartcrop.py    saliency-weighted content-aware crop (near-square)
+  textflow.py     CV text word-segmentation + re-wrapping (no fonts)
+  background.py   cover-fill to exact canvas (no padding)
+  reflow.py       content-preserving element reflow for banners & skyscraper
+  pipeline.py     orchestration, routing, saving, debug/montage
+run.py            convenience entry point (== python -m adapt)
+view_psd.py       PSD inspector: composite + per-layer PNG export
+tests/            pytest suite
+```
+
+`input/` and `output/` are gitignored — the master PSDs are large binaries kept
+locally, and every output is reproducible from them.
+
+## Tests
+
+```bash
+python -m pytest -q
+```
+
+Covers aspect-based routing, the photo-only fallback path, role extraction from
+the PSD, importance-map shape and range, exact-dimension guarantees for every
+format, CV text re-wrapping, and the flat-image contour fallback.
+
+Tests that need the master PSD skip cleanly when it is absent, so a fresh clone
+without `input/Axis.psd` still runs the routing and pure-CV tests.
+
+## Limitations / notes
+
+* The brief said "1080×1080 / 5 assets / 1200×300"; the actual master is
+  **1200×1200** and the actual list is **six IAB sizes** — the tool targets the
+  real master and the six listed sizes.
+* At 60–90 px tall the fine print (riskometer, disclaimer) is kept but is
+  necessarily small — the reflow prioritises keeping *all* content over per-line
+  legibility, matching the brief's "no clipping" requirement.
+* The `crop` path resizes the composite to the target aspect rather than
+  cropping, so near-square outputs carry a small amount of anisotropic
+  distortion. This was the deliberate trade for keeping every element and
+  filling the frame with no side gaps.
+* The flat-JPEG path recovers salient objects but cannot recover semantic roles
+  or re-wrap text; results there are best-effort versus the layer-aware PSD path.
+* Role classification is keyword-based, so a master using very different layer
+  naming needs new keywords in `elements.classify` — the intended extension
+  point.
