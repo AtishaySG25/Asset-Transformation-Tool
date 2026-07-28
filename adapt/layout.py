@@ -44,6 +44,7 @@ class Placement:
     role: str = ""
     visible: bool = True
     lock_aspect: bool = True
+    opacity: float = 1.0            # <1 lets whatever is behind show through
     params: dict = field(default_factory=dict)
     # Tile cached by the planner so the first render costs nothing extra. Never
     # serialised; a plan loaded from JSON simply re-renders from `params`.
@@ -55,7 +56,8 @@ class Placement:
                 "w": round(self.w, 2), "h": round(self.h, 2),
                 "z": self.z, "element": self.element, "name": self.name,
                 "role": self.role, "visible": self.visible,
-                "lock_aspect": self.lock_aspect, "params": dict(self.params)}
+                "lock_aspect": self.lock_aspect, "opacity": round(self.opacity, 3),
+                "params": dict(self.params)}
 
     @classmethod
     def from_json(cls, d: dict) -> "Placement":
@@ -66,6 +68,7 @@ class Placement:
                    name=d.get("name", ""), role=d.get("role", ""),
                    visible=bool(d.get("visible", True)),
                    lock_aspect=bool(d.get("lock_aspect", True)),
+                   opacity=float(d.get("opacity", 1.0)),
                    params=dict(d.get("params") or {}))
 
 

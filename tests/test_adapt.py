@@ -181,7 +181,7 @@ def test_manual_edits_survive_a_save_and_reload(source, tmp_path):
     plan = plan_for_format(source, fmt, imp)
     moved = next(p for p in plan.placements if p.kind == "element")
     moved.x, moved.y = 7, 3
-    store.save("input/Axis.psd", {fmt.name: plan}, str(tmp_path))
+    store.save("input/Axis.psd", {fmt.name: plan}, out_dir=str(tmp_path))
 
     back = store.load("input/Axis.psd", str(tmp_path))[fmt.name]
     p2 = back.by_id(moved.id)
@@ -229,6 +229,94 @@ def test_web_api_round_trip(source, tmp_path):
 
     with Image.open(io.BytesIO(c.get("/api/render/300x250.png").data)) as im:
         assert im.size == (300, 250)
+
+
+def test_justify_fills_the_column():
+    # Justified lines span the full column; the last line stays flush left.
+    from PIL import Image as Im, ImageDraw
+    strip = Im.new("RGBA", (600, 40), (0, 0, 0, 0))
+    d = ImageDraw.Draw(strip)
+    for i in range(6):
+        d.rectangle([i * 100 + 10, 8, i * 100 + 70, 32], fill=(200, 0, 80, 255))
+    left = textflow.reflow_to_width(strip, target_w=140, line_h=24, align="left")
+    just = textflow.reflow_to_width(strip, target_w=140, line_h=24, align="justify")
+    assert just.width == 140 >= left.width      # fills the column exactly
+    assert just.height == left.height           # same line breaks, same height
+
+
+def test_element_crop_is_fractional_and_exact(source):
+    from adapt import tiles
+    el = next(e for e in source.elements if not e.is_type)
+    full = tiles.graphic_tile(el, 200, 100)
+    half = tiles.graphic_tile(el, 200, 100, crop=[0.0, 0.0, 0.5, 1.0])
+    assert full.size == half.size == (200, 100)   # the box is unchanged...
+    assert np.array(full) .shape == np.array(half).shape
+    assert not np.array_equal(np.array(full), np.array(half))   # ...content is not
+    # A full-extent crop is a no-op.
+    assert np.array_equal(np.array(tiles.graphic_tile(el, 60, 60, crop=[0, 0, 1, 1])),
+                          np.array(tiles.graphic_tile(el, 60, 60)))
+
+
+def test_opacity_fades_towards_what_is_behind(source):
+    from adapt.pipeline import plan_for_format, render
+    from adapt import saliency as sal
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+    fmt = FORMATS[0]
+    plan = plan_for_format(source, fmt, imp)
+    solid = np.array(render(plan, source), dtype=np.int16)
+    for p in plan.placements:
+        if p.kind == "element":
+            p.opacity = 0.0
+    faded = np.array(render(plan, source), dtype=np.int16)
+    assert solid.shape == faded.shape
+    assert np.abs(solid - faded).mean() > 1.0     # elements really did fade out
+
+
+def test_custom_sizes_are_laid_out_and_reviewed(source):
+    # A custom size goes through the same engine; review() reports when it fails.
+    from adapt.formats import Format, validate
+    from adapt.pipeline import plan_for_format, plan_raw, render, review
+    from adapt import saliency as sal
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+
+    assert validate(10, 10) and validate(99999, 100)      # rejected, with a reason
+    assert validate(1000, 300) is None
+
+    ok = Format(1000, 300)
+    assert render(plan_for_format(source, ok, imp), source).size == (1000, 300)
+    assert review(plan_for_format(source, ok, imp), source) == []
+
+    harsh = Format(120, 40)
+    assert review(plan_for_format(source, harsh, imp), source), "should warn"
+
+    # The manual fallback still holds every element, at the exact size.
+    raw = plan_raw(source, harsh.width, harsh.height)
+    assert len([p for p in raw.placements if p.kind == "element"]) == len(source.elements)
+    assert render(raw, source).size == (120, 40)
+
+
+def test_no_standard_format_trips_a_warning(source):
+    # The thresholds must not cry wolf on the six sizes we ship.
+    from adapt.pipeline import plan_for_format, review
+    from adapt import saliency as sal
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+    for fmt in FORMATS:
+        assert review(plan_for_format(source, fmt, imp), source) == [], fmt.name
+
+
+def test_custom_sizes_persist_and_reach_the_cli(source, tmp_path):
+    from adapt import store
+    from adapt.formats import Format
+    from adapt.pipeline import run
+    store.save(INPUT, {}, custom=[Format(1000, 300)], out_dir=str(tmp_path))
+    assert store.load_custom(INPUT, str(tmp_path)) == [Format(1000, 300)]
+    paths = run(INPUT, str(tmp_path), debug=False, use_saved=True)
+    assert any(p.endswith("1000x300.png") for p in paths)
+    with Image.open(tmp_path / "1000x300.png") as im:
+        assert im.size == (1000, 300)
 
 
 def test_detect_objects_flat_fallback():

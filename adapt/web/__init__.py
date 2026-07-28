@@ -15,10 +15,14 @@ Routes
 ``GET  /api/manifest``           current asset: elements, formats, edited state
 ``GET  /api/element/<i>.png``    one extracted element, as extracted
 ``GET  /api/tile.png``           stateless tile preview (drives live editing)
+``POST /api/formats``            add a custom target size
+``DELETE /api/formats/<fmt>``    remove a custom target size
+``GET  /api/review``             per-format warnings (what the algorithm couldn't do)
 ``GET  /api/plan/<fmt>``         algorithmic (or saved) plan
 ``PUT  /api/plan/<fmt>``         persist a hand-edited plan
 ``POST /api/plan/<fmt>/reset``   drop the manual layout, back to the algorithm
 ``POST /api/plan/<fmt>/explode`` break a flat 'fit' plan into per-element boxes
+``POST /api/plan/<fmt>/raw``     every layer in reading order (manual fallback)
 ``GET  /api/render/<fmt>.png``   render the stored plan
 ``POST /api/render/<fmt>.png``   render a posted plan (live preview / export)
 ``POST /api/export``             write PNGs for every format to the output dir
@@ -34,11 +38,12 @@ import numpy as np
 from flask import (Flask, abort, jsonify, render_template, request,
                    send_file, url_for)
 
+from .. import formats as formats_mod
 from .. import saliency, store
 from ..formats import FORMATS, Format
 from ..layout import LayoutPlan, Placement
 from ..pipeline import (_bgr, effective_strategy, plan_explode, plan_for_format,
-                        render as render_image)
+                        plan_raw, render as render_image, review)
 from ..psd_source import load
 from ..render import placement_tile
 
@@ -55,16 +60,37 @@ class Session:
         self.importance = saliency.importance_map(_bgr(self.source.composite),
                                                   self.source.elements)
         self.saved = store.load(path, out_dir)          # hand-edited, from disk
+        self.custom = store.load_custom(path, out_dir)  # user-added target sizes
         self.auto: dict[str, LayoutPlan] = {}           # algorithmic, memoised
         self.rev = int(time.time())                     # cache-buster for renders
 
-    # -- plans ------------------------------------------------------------
+    # -- formats ----------------------------------------------------------
+    def all_formats(self) -> list[Format]:
+        return list(FORMATS) + self.custom
+
     def fmt(self, name: str) -> Format:
-        for f in FORMATS:
+        for f in self.all_formats():
             if f.name == name:
                 return f
         abort(404, f"unknown format {name}")
 
+    def add_format(self, w: int, h: int) -> Format:
+        why = formats_mod.validate(w, h)
+        if why:
+            abort(400, why)
+        f = Format(w, h)
+        if f.name not in {x.name for x in self.all_formats()}:
+            self.custom.append(f)
+            self._persist()
+        return f
+
+    def drop_format(self, name: str):
+        self.custom = [f for f in self.custom if f.name != name]
+        self.saved.pop(name, None)
+        self.auto.pop(name, None)
+        self._persist()
+
+    # -- plans ------------------------------------------------------------
     def auto_plan(self, name: str) -> LayoutPlan:
         if name not in self.auto:
             self.auto[name] = plan_for_format(self.source, self.fmt(name),
@@ -77,12 +103,15 @@ class Session:
     def set_plan(self, name: str, plan: LayoutPlan):
         self.saved[name] = plan
         self.rev += 1
-        store.save(self.path, self.saved, self.out_dir)
+        self._persist()
 
     def reset(self, name: str):
         self.saved.pop(name, None)
         self.rev += 1
-        store.save(self.path, self.saved, self.out_dir)
+        self._persist()
+
+    def _persist(self):
+        store.save(self.path, self.saved, self.custom, self.out_dir)
 
     # -- description for the browser --------------------------------------
     def manifest(self) -> dict:
@@ -100,8 +129,9 @@ class Session:
             "formats": [
                 {"name": f.name, "width": f.width, "height": f.height,
                  "strategy": effective_strategy(src, f),
-                 "edited": f.name in self.saved}
-                for f in FORMATS],
+                 "edited": f.name in self.saved,
+                 "custom": f.name not in {x.name for x in FORMATS}}
+                for f in self.all_formats()],
             "rev": self.rev,
         }
 
@@ -209,15 +239,57 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
             abort(404)
         return png(tile, max_age=3600)
 
+    # ------------------------------------------------------------ formats --
+    @app.post("/api/formats")
+    def api_add_format():
+        """Register a custom target size. The core algorithm lays it out like
+        any other format; `review` reports whether that succeeded."""
+        d = request.get_json(silent=True) or {}
+        try:
+            w, h = int(d.get("width")), int(d.get("height"))
+        except (TypeError, ValueError):
+            abort(400, "width and height must be whole numbers")
+        s = session()
+        f = s.add_format(w, h)
+        return jsonify({"format": f.name, "manifest": s.manifest()})
+
+    @app.delete("/api/formats/<fmt>")
+    def api_drop_format(fmt):
+        s = session()
+        if fmt in {x.name for x in FORMATS}:
+            abort(400, "the six standard sizes cannot be removed")
+        s.drop_format(fmt)
+        return jsonify(s.manifest())
+
+    @app.get("/api/review")
+    def api_review():
+        """Per-format warnings — what the algorithm could not do at that size."""
+        s = session()
+        return jsonify({f.name: review(s.plan(f.name), s.source)
+                        for f in s.all_formats()})
+
     # -------------------------------------------------------------- plans --
     def plan_payload(name: str, plan: LayoutPlan, s: Session) -> dict:
         return {"format": name, "plan": plan.to_json(),
-                "edited": name in s.saved, "rev": s.rev}
+                "edited": name in s.saved, "rev": s.rev,
+                "warnings": review(plan, s.source)}
 
     @app.get("/api/plan/<fmt>")
     def api_plan(fmt):
         s = session()
         return jsonify(plan_payload(fmt, s.plan(fmt), s))
+
+    @app.post("/api/plan/<fmt>/raw")
+    def api_plan_raw(fmt):
+        """Every layer in reading order, nothing else — the starting point when
+        the algorithmic layout cannot work at this size. Not saved until the
+        client PUTs it back."""
+        s = session()
+        f = s.fmt(fmt)
+        plan = plan_raw(s.source, f.width, f.height)
+        return jsonify({"format": fmt, "plan": plan.to_json(),
+                        "edited": fmt in s.saved, "rev": s.rev,
+                        "warnings": review(plan, s.source)})
 
     @app.put("/api/plan/<fmt>")
     def api_plan_save(fmt):
@@ -240,7 +312,8 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
         f = s.fmt(fmt)
         plan = plan_explode(s.source, f.width, f.height)
         return jsonify({"format": fmt, "plan": plan.to_json(),
-                        "edited": fmt in s.saved, "rev": s.rev})
+                        "edited": fmt in s.saved, "rev": s.rev,
+                        "warnings": review(plan, s.source)})
 
     # ------------------------------------------------------------ renders --
     def _render(fmt: str, plan: LayoutPlan):
@@ -267,7 +340,7 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
         out = app.config["OUT_DIR"]
         os.makedirs(out, exist_ok=True)
         written = []
-        for f in FORMATS:
+        for f in s.all_formats():
             img = _render(f.name, s.plan(f.name))
             path = os.path.join(out, f"{f.name}.png")
             img.save(path)

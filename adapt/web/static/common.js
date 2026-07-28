@@ -33,7 +33,9 @@ function toast(msg, isError = false) {
    its box size is rasterised server-side by the same code the exporter uses. */
 function tileURL(p) {
   if (p.kind === "color_bar") return null;              // drawn as a CSS colour
-  if (p.kind === "element" && p.params.mode !== "reflow")
+  // An uncropped, unwrapped element is served as extracted and scaled by CSS;
+  // anything whose pixels depend on the box goes through the tile renderer.
+  if (p.kind === "element" && p.params.mode !== "reflow" && !p.params.crop)
     return `/api/element/${p.element}.png`;
   const q = new URLSearchParams({
     kind: p.kind,

@@ -42,6 +42,33 @@ CROP_ASPECT_LO = 0.62
 CROP_ASPECT_HI = 1.60
 
 
+# Hard bounds for user-supplied sizes: below MIN_SIDE nothing can be legible at
+# any layout, above MAX_SIDE we would be rendering hundreds of megapixels at 2x
+# supersampling.
+MIN_SIDE = 16
+MAX_SIDE = 8000
+
+
+def parse(name: str) -> Format:
+    """'970x90' -> Format(970, 90). Raises ValueError on anything else."""
+    try:
+        w, h = (int(v) for v in str(name).lower().split("x"))
+    except (ValueError, TypeError):
+        raise ValueError(f"not a size: {name!r}")
+    return Format(w, h)
+
+
+def validate(w: int, h: int) -> str | None:
+    """None if (w, h) is a renderable target, else why not."""
+    if not (isinstance(w, int) and isinstance(h, int)):
+        return "width and height must be whole numbers"
+    if w < MIN_SIDE or h < MIN_SIDE:
+        return f"both sides must be at least {MIN_SIDE}px"
+    if w > MAX_SIDE or h > MAX_SIDE:
+        return f"sides must be at most {MAX_SIDE}px"
+    return None
+
+
 def strategy_for(fmt: Format, source_aspect: float = 1.0) -> str:
     """Return 'crop' or 'reflow' for a target format."""
     rel = fmt.aspect / source_aspect

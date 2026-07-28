@@ -100,9 +100,35 @@ def text_tile(el, wrap_w: int, line_h: int, align: str = "left",
                                     max(1, int(line_h)), align=align, ss=ss)
 
 
-def graphic_tile(el, w: int, h: int) -> Image.Image:
+def crop_fractions(img: Image.Image, crop) -> Image.Image:
+    """Cut a sub-rectangle out of an element, given as (l, t, r, b) *fractions*
+    of its own size. Fractions rather than pixels so a crop keeps meaning at any
+    box size and survives the element being re-extracted."""
+    if not crop:
+        return img
+    l, t, r, b = (float(v) for v in crop)
+    W, H = img.size
+    box = (max(0, min(W - 1, round(l * W))), max(0, min(H - 1, round(t * H))),
+           max(1, min(W, round(r * W))), max(1, min(H, round(b * H))))
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return img
+    return img.crop(box)
+
+
+def graphic_tile(el, w: int, h: int, crop=None) -> Image.Image:
     """Scale a graphic element to an exact box (aspect is the caller's business)."""
-    return el.image.resize((max(1, int(w)), max(1, int(h))), Image.LANCZOS)
+    img = crop_fractions(el.image, crop)
+    return img.resize((max(1, int(w)), max(1, int(h))), Image.LANCZOS)
+
+
+def with_opacity(tile: Image.Image, opacity: float) -> Image.Image:
+    """Fade a tile so whatever sits behind it shows through."""
+    if opacity >= 1.0:
+        return tile
+    tile = tile.convert("RGBA")
+    a = np.array(tile)
+    a[:, :, 3] = (a[:, :, 3].astype(np.float32) * max(0.0, opacity)).astype(np.uint8)
+    return Image.fromarray(a)
 
 
 def photo_band_tile(bg: Image.Image, w: int, h: int, feather: float = 0.22,

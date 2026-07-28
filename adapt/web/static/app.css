@@ -138,6 +138,35 @@ header .spacer { flex: 1; }
 .box.outline { outline: 1px dashed #55607a; }
 .box.hidden { display: none; }
 
+/* Crop overlay: the whole element dimmed, with the kept region shown bright
+   through a clipped copy of the same image. */
+#cropLayer { position: absolute; z-index: 50; }
+#cropLayer .cdim { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .3; }
+/* The dimming comes from .cdim underneath, so the scrim stays inside the
+   element being cropped instead of greying out the whole banner. */
+#cropLayer .croprect {
+  position: absolute;
+  overflow: hidden;
+  outline: 1px solid var(--accent-2);
+  cursor: move;
+}
+#cropLayer .croprect .cfull { position: absolute; max-width: none; }
+
+.warnbox {
+  max-width: 640px;
+  margin: 0 auto 18px;
+  background: #2a2416;
+  border: 1px solid #7a6330;
+  color: #ffd479;
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+.warnbox ul { margin: 6px 0 10px; padding-left: 20px; }
+.warnbox b { color: #ffe6ad; }
+
+.sizeform { display: flex; align-items: center; gap: 6px; }
+.sizeform input { width: 68px; }
+
 .handle {
   position: absolute; width: 9px; height: 9px; background: #fff;
   border: 1px solid var(--accent); border-radius: 2px; z-index: 5;

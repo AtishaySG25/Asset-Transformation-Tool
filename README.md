@@ -89,10 +89,13 @@ plan sent through `to_json`/`from_json` renders **byte-identically**.
 
 | kind | what it draws |
 |------|----------------|
-| `element` | one extracted element. `params.mode` is `reflow` (text re-wrapped to the box width) or `stretch` (scaled to the box) |
+| `element` | one extracted element. `params.mode` is `reflow` (text re-wrapped to the box width) or `stretch` (scaled to the box); `params.crop` keeps a sub-rectangle, as fractions of the element's own image |
 | `photo_band` | the background, cover-filled into the box, optionally alpha-feathered |
 | `color_bar` | a solid rectangle (footer bar, disclaimer strip) |
 | `base_image` | a full-frame image from the composite (the `fit` and `photo` strategies) |
+
+Every placement also carries an `opacity`, so an element can be faded to let
+whatever sits behind it — usually the background imagery — show through.
 
 ### Wrapping must be reproducible
 
@@ -119,7 +122,18 @@ dependency-free vanilla-JS front end — no CDN, works offline.
   clamps exactly as the renderer does.
 * **Text behaves like text.** Dragging a text box's side re-wraps it through
   `textflow` on the server and returns the real block; dragging top/bottom
-  changes the type size. Glyphs are never stretched.
+  changes the type size. Glyphs are never stretched. Alignment is left, centre,
+  right or **justified** (justified lines fill the column; the last stays flush).
+* **Opacity and backdrops.** Every placement has an opacity slider, and
+  **Background behind** drops the master's own imagery in behind a chosen
+  element as its own placement — which can then be moved, faded or feathered
+  independently.
+* **Crop.** Any non-text element can be cropped interactively: the element is
+  shown dimmed with a bright rectangle over the part being kept. The crop is
+  stored as *fractions* of the element's image, so it keeps its meaning at any
+  box size.
+* **Undo/redo** (Ctrl+Z / Ctrl+Y, 120 deep) over everything — moves, resizes,
+  crops, restacking, hiding, canvas resizes.
 * **Per format.** Moving something in `970x90` has no effect on `160x600`.
 * **Reset to algorithm** per format, **Show render** to see the true server
   render beside the canvas, **Export PNG** (single) and **Export all** (writes
@@ -131,6 +145,27 @@ dependency-free vanilla-JS front end — no CDN, works offline.
 Edits autosave to `output/layouts/<master>.json` and are re-applied headlessly by
 `python run.py --use-layout`, so the editor is not a dead end: what you arrange by
 hand stays part of the reproducible build.
+
+### Sizes beyond the six
+
+**Add size** in the gallery registers any `w × h` (16–8000px per side) and runs
+the *same* layout engine on it — custom sizes are not a second-class path. They
+persist with the layouts and are rendered by `--use-layout` alongside the six.
+
+Some targets are simply too harsh for an automatic layout, so
+`pipeline.review()` inspects the resulting plan and reports what went wrong:
+elements below 6px, text below a 4px line height, or boxes that overflow the
+frame and get clamped on top of each other. The thresholds are calibrated so
+that none of the six shipped sizes trips one — `468x60` legitimately runs a 4px
+line height. When a size does warn, the gallery says so and offers **Edit
+manually (raw layout)**: `pipeline.plan_raw()` drops every element into the
+frame in reading order, scaled to fit, with no synthesized furniture — a
+guaranteed-complete starting point to arrange by hand.
+
+**Resize** in the editor rescales an entire layout to a new canvas: positions
+follow each axis, aspect-locked graphics scale uniformly so they are never
+distorted, and type size follows the smaller axis. The result is saved as a
+custom size of its own, leaving the original untouched.
 
 ## The approach: Hybrid (layer-aware + OpenCV)
 
@@ -277,6 +312,11 @@ Plus the guarantees the editor rests on: a plan survives a JSON round-trip
 plan recorded, hand-edited layouts persist and reload, and the whole web API
 (open → plan → tile → edit → save → reset → explode → render) round-trips through
 Flask's test client.
+
+And the editing features themselves: justified text fills its column, a
+fractional crop changes an element's content without moving its box, opacity
+really fades towards what is behind, custom sizes lay out and reach the CLI, and
+`review()` warns on harsh sizes while staying silent on all six standard ones.
 
 Tests that need the master PSD skip cleanly when it is absent, so a fresh clone
 without `input/Axis.psd` still runs the routing and pure-CV tests.

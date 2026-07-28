@@ -63,7 +63,7 @@ def plan_photo(source: Source, tw: int, th: int, importance: np.ndarray) -> Layo
                       base_color=tiles.base_color(source.background))
     plan.add(Placement(id="photo", kind="base_image", x=0, y=0, w=tw, h=th,
                        lock_aspect=False,
-                       params={"src": "composite", "crop": [int(v) for v in box]}))
+                       params={"src": "composite", "crop_px": [int(v) for v in box]}))
     return plan
 
 
@@ -101,6 +101,94 @@ def plan_explode(source: Source, tw: int, th: int) -> LayoutPlan:
                            name=el.name, role=el.role,
                            params={"mode": "stretch"}))
     return plan
+
+
+def plan_raw(source: Source, tw: int, th: int) -> LayoutPlan:
+    """The fallback layout: no cleverness, just every layer in reading order.
+
+    Used when a target is too extreme for the algorithm to lay out sensibly —
+    the point is to give a starting arrangement that is guaranteed to contain
+    every element, in order, for the user to fix by hand.
+    """
+    plan = LayoutPlan(tw, th, strategy="raw",
+                      base_color=tiles.base_color(source.background))
+    plan.add(Placement(id="backdrop", kind="base_image", x=0, y=0, w=tw, h=th,
+                       lock_aspect=False, params={"src": "background"}))
+
+    els = sorted(enumerate(source.elements), key=lambda t: (t[1].cy, t[1].cx))
+    if not els:
+        return plan
+
+    down = th >= tw                       # stack vertically, else flow across
+    pad = max(1, round(0.02 * min(tw, th)))
+    slot = ((th - pad) / len(els) - pad) if down else ((tw - pad) / len(els) - pad)
+    slot = max(1.0, slot)
+    at = pad
+    for idx, el in els:
+        if down:
+            w, h = _fit_box(el, tw - 2 * pad, slot)
+            plan.add(_raw_placement(idx, el, (tw - w) / 2, at, w, h))
+        else:
+            w, h = _fit_box(el, slot, th - 2 * pad)
+            plan.add(_raw_placement(idx, el, at, (th - h) / 2, w, h))
+        at += (h if down else w) + pad
+    return plan
+
+
+def _fit_box(el, max_w: float, max_h: float) -> tuple[float, float]:
+    s = min(max_w / max(1, el.width), max_h / max(1, el.height))
+    return max(1.0, el.width * s), max(1.0, el.height * s)
+
+
+def _raw_placement(idx: int, el, x, y, w, h) -> Placement:
+    return Placement(id=element_id(idx, el), kind="element", x=x, y=y, w=w, h=h,
+                     element=idx, name=el.name, role=el.role,
+                     params={"mode": "stretch"})
+
+
+# Below these, a layout exists but is not usable output. Calibrated against the
+# six shipped sizes so none of them trips a warning: the tightest of them
+# (468x60) legitimately runs a 4px line height and 7px elements.
+MIN_ELEMENT_PX = 6
+MIN_LINE_PX = 4
+
+
+def review(plan: LayoutPlan, source: Source) -> list[str]:
+    """Reasons this plan is not usable at this size — empty means it is fine.
+
+    Judged on the *plan* rather than on the dimensions, so it reports what the
+    layout engine actually managed to do rather than guessing in advance.
+    """
+    problems = []
+    tiny = [p for p in plan.placements
+            if p.kind == "element" and min(p.w, p.h) < MIN_ELEMENT_PX]
+    if tiny:
+        problems.append(
+            f"{len(tiny)} element(s) shrink below {MIN_ELEMENT_PX}px: "
+            f"{', '.join(sorted({p.role or p.name for p in tiny}))}")
+
+    small_text = [p for p in plan.placements
+                  if p.params.get("mode") == "reflow"
+                  and p.params.get("line_h", 99) < MIN_LINE_PX]
+    if small_text:
+        problems.append(f"{len(small_text)} text block(s) fall below "
+                        f"{MIN_LINE_PX}px line height and will be illegible")
+
+    # The renderer clamps stray tiles into the frame, so an overflowing plan
+    # does not crash — it silently stacks things on top of each other instead.
+    spill = [p for p in plan.placements
+             if p.x < -0.5 or p.y < -0.5
+             or p.x + p.w > plan.width + 0.5 or p.y + p.h > plan.height + 0.5]
+    if spill:
+        problems.append(f"{len(spill)} element(s) do not fit the frame and get "
+                        "pushed back inside, overlapping their neighbours")
+
+    area = plan.width * plan.height
+    used = sum(p.w * p.h for p in plan.placements if p.kind == "element")
+    if area and used > 1.25 * area:
+        problems.append("elements need more room than the canvas has — "
+                        "they will overlap heavily")
+    return problems
 
 
 def plan_for_format(source: Source, fmt, importance: np.ndarray) -> LayoutPlan:
@@ -169,7 +257,11 @@ def run(input_path: str, out_dir: str = "output", debug: bool = True,
     saved = store.load(input_path, out_dir) if use_saved else {}
 
     os.makedirs(out_dir, exist_ok=True)
-    formats = FORMATS if sizes is None else sizes
+    formats = list(FORMATS) if sizes is None else list(sizes)
+    if use_saved and sizes is None:
+        # Custom sizes added in the editor are part of the deliverable too.
+        formats += [f for f in store.load_custom(input_path, out_dir)
+                    if f.name not in {x.name for x in formats}]
 
     results, paths = [], []
     for fmt in formats:

@@ -123,20 +123,32 @@ def reflow_to_width(rgba: Image.Image, target_w: int, line_h: int,
     line_w_each = [sum(sized[i][1] for i in ln) + space_r * (len(ln) - 1)
                    for ln in lines]
     block_w = max(line_w_each)          # never clipped: the widest line always fits
+    if align == "justify":
+        # Justified text fills the column, so the block *is* the column — which
+        # also keeps the plan round-trip exact (block width == box width).
+        # Lines that get justified may be squeezed to reach it (per-word rounding
+        # at ss can overshoot by a pixel or two); lines that are left alone —
+        # single words and the last line — still set a floor, so nothing clips.
+        fixed = [w for i, (ln, w) in enumerate(zip(lines, line_w_each))
+                 if len(ln) == 1 or i == len(lines) - 1]
+        block_w = max([round(target_w * ss)] + fixed)
     block_h = sum(line_h_each) + gap_r * (len(lines) - 1)
 
     canvas = Image.new("RGBA", (max(1, block_w), max(1, block_h)), (0, 0, 0, 0))
     y = 0
-    for ln, lh, lw in zip(lines, line_h_each, line_w_each):
+    for n, (ln, lh, lw) in enumerate(zip(lines, line_h_each, line_w_each)):
+        gap, x = space_r, 0
         if align == "center":
             x = (block_w - lw) // 2
         elif align == "right":
             x = block_w - lw
-        else:
-            x = 0
-        for i in ln:
+        elif align == "justify" and len(ln) > 1 and n < len(lines) - 1:
+            # Spread the slack between words (or take it back, if the line
+            # overshot); the last line stays flush left.
+            gap = max(1.0, space_r + (block_w - lw) / (len(ln) - 1))
+        for k, i in enumerate(ln):
             img, nw, nh = sized[i]
-            canvas.alpha_composite(img, (max(0, x), y + (lh - nh) // 2))
-            x += nw + space_r
+            canvas.alpha_composite(img, (max(0, round(x)), y + (lh - nh) // 2))
+            x += nw + gap
         y += lh + gap_r
     return canvas

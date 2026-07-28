@@ -8,14 +8,17 @@
 const $ = (id) => document.getElementById(id);
 const FMT = document.body.dataset.fmt;
 const MIN = 4;                       // smallest allowed box, in output px
+const HISTORY = 120;                 // undo depth
 
 let manifest = null, plan = null, info = null;
 let zoom = 1, selId = null, saveTimer = null;
+let undoStack = [], redoStack = [], cropping = null;
 const boxes = new Map();             // placement id -> DOM node
 
 const sel = () => plan.placements.find((p) => p.id === selId) || null;
 const byZ = () => [...plan.placements].sort((a, b) => a.z - b.z);
 const isText = (p) => p.kind === "element" && p.params.mode === "reflow";
+const canCrop = (p) => p.kind === "element" && p.params.mode !== "reflow";
 
 /* ------------------------------------------------------------- loading -- */
 async function boot() {
@@ -27,9 +30,22 @@ async function boot() {
     return;
   }
   info = manifest.formats.find((f) => f.name === FMT);
+  if (!info) {
+    document.querySelector(".workspace").innerHTML =
+      `<div class="empty">${FMT} is not a size on this asset — <a href="/">back</a>.</div>`;
+    return;
+  }
   $("strategy").textContent = info.strategy;
   buildTabs();
-  await loadPlan();
+
+  // ?raw=1 — arrive straight in the manual fallback layout (from a warned card)
+  if (new URLSearchParams(location.search).get("raw")) {
+    await loadPlan(await api(`/api/plan/${FMT}/raw`, { method: "POST" }));
+    markDirty();
+    toast("raw layout — every layer in order, arrange as you like");
+  } else {
+    await loadPlan();
+  }
   fitZoom();
 }
 
@@ -44,9 +60,32 @@ async function loadPlan(fresh = null) {
   plan = data.plan;
   $("editedBadge").hidden = !data.edited;
   $("explode").hidden = !(plan.strategy === "fit" || plan.strategy === "photo");
+  showWarnings(data.warnings);
+  $("cw").value = plan.width;
+  $("ch").value = plan.height;
+  undoStack = []; redoStack = [];
+  selId = null;
+  rebuild();
+}
+
+function showWarnings(warnings) {
+  const el = $("warnings");
+  if (!warnings || !warnings.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = `<b>This size is a stretch for the algorithm.</b>
+    <ul>${warnings.map((w) => `<li>${w}</li>`).join("")}</ul>
+    <button id="goRaw">Start from a raw layout instead</button>`;
+  $("goRaw").onclick = async () => {
+    snapshot();
+    const d = await api(`/api/plan/${FMT}/raw`, { method: "POST" });
+    plan = d.plan; showWarnings(d.warnings); rebuild(); markDirty();
+  };
+}
+
+function rebuild() {
   boxes.forEach((n) => n.remove());
   boxes.clear();
-  selId = null;
+  if (selId && !plan.placements.some((p) => p.id === selId)) selId = null;
   paint();
 }
 
@@ -66,6 +105,7 @@ function setZoom(z) {
   zoom = z;
   $("zoomLabel").textContent = `${Math.round(z * 100)}%`;
   paint();
+  if (cropping) paintCrop();
 }
 
 function paint() {
@@ -93,8 +133,9 @@ function syncBox(p) {
   el.style.width = `${p.w * zoom}px`;
   el.style.height = `${p.h * zoom}px`;
   el.style.zIndex = p.z;
+  el.style.opacity = p.opacity ?? 1;
   el.classList.toggle("hidden", !p.visible);
-  el.classList.toggle("sel", p.id === selId);
+  el.classList.toggle("sel", p.id === selId && !cropping);
   el.classList.toggle("outline", p.id !== selId);
   el.style.background = p.kind === "color_bar" ? cssColor(p.params.color) : "";
   el.style.justifyContent = { center: "center", right: "flex-end" }[p.params.align]
@@ -113,7 +154,7 @@ function syncBox(p) {
     }
     sizeTileImg(p, img);
   }
-  if (p.id === selId) addHandles(el);
+  if (p.id === selId && !cropping) addHandles(el);
   else el.querySelectorAll(".handle").forEach((h) => h.remove());
 }
 
@@ -142,19 +183,20 @@ function onTileLoaded(p, img) {
 }
 
 const DIRS = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
-function addHandles(el) {
-  if (el.querySelector(".handle")) return;
+function handleEls(host) {
   for (const d of DIRS) {
     const h = document.createElement("div");
     h.className = "handle";
     h.dataset.dir = d;
     h.style.cursor = `${d}-resize`;
-    const x = d.includes("w") ? "0%" : d.includes("e") ? "100%" : "50%";
-    const y = d.includes("n") ? "0%" : d.includes("s") ? "100%" : "50%";
-    h.style.left = x; h.style.top = y;
+    h.style.left = d.includes("w") ? "0%" : d.includes("e") ? "100%" : "50%";
+    h.style.top = d.includes("n") ? "0%" : d.includes("s") ? "100%" : "50%";
     h.style.transform = "translate(-50%, -50%)";
-    el.appendChild(h);
+    host.appendChild(h);
   }
+}
+function addHandles(el) {
+  if (!el.querySelector(".handle")) handleEls(el);
 }
 
 /* ---------------------------------------------------------- selection -- */
@@ -165,10 +207,39 @@ function select(id) {
   drawProps();
 }
 
+/* ------------------------------------------------------------- history -- */
+function snapshot() {
+  const s = JSON.stringify(plan);
+  if (undoStack[undoStack.length - 1] === s) return;
+  undoStack.push(s);
+  if (undoStack.length > HISTORY) undoStack.shift();
+  redoStack.length = 0;
+  syncHistoryButtons();
+}
+
+function syncHistoryButtons() {
+  $("undo").disabled = !undoStack.length;
+  $("redo").disabled = !redoStack.length;
+}
+
+function step(from, to) {
+  if (!from.length) return;
+  to.push(JSON.stringify(plan));
+  plan = JSON.parse(from.pop());
+  $("cw").value = plan.width;
+  $("ch").value = plan.height;
+  rebuild();
+  syncHistoryButtons();
+  autosave();
+}
+const undo = () => step(undoStack, redoStack);
+const redo = () => step(redoStack, undoStack);
+
 /* ------------------------------------------------------- drag & resize -- */
 let drag = null;
 
 $("stage").addEventListener("pointerdown", (e) => {
+  if (cropping) return;
   const handleEl = e.target.closest(".handle");
   const boxEl = e.target.closest(".box");
   if (!boxEl) { select(null); return; }
@@ -176,7 +247,7 @@ $("stage").addEventListener("pointerdown", (e) => {
   if (!p) return;
   if (!handleEl) select(p.id);
   drag = {
-    p, dir: handleEl ? handleEl.dataset.dir : null,
+    p, dir: handleEl ? handleEl.dataset.dir : null, moved: false,
     sx: e.clientX, sy: e.clientY,
     o: { x: p.x, y: p.y, w: p.w, h: p.h, line_h: p.params.line_h || 0 },
   };
@@ -188,16 +259,24 @@ $("stage").addEventListener("pointermove", (e) => {
   if (!drag) return;
   const dx = (e.clientX - drag.sx) / zoom;
   const dy = (e.clientY - drag.sy) / zoom;
+  if (!drag.moved) {
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;  // a click, not a drag
+    drag.moved = true;
+    undoStack.push(JSON.stringify(plan));       // snapshot the pre-drag state
+    redoStack.length = 0;
+    syncHistoryButtons();
+  }
   drag.dir ? applyResize(drag, dx, dy, e.shiftKey) : applyMove(drag, dx, dy);
   syncBox(drag.p);
   drawProps();
 });
 
-function endDrag(e) {
+function endDrag() {
   if (!drag) return;
   clearGuides();
-  const p = drag.p;
+  const { p, moved } = drag;
   drag = null;
+  if (!moved) return;
   if (isText(p)) syncBox(p);           // re-fetch the wrap at the new width
   markDirty();
 }
@@ -273,14 +352,125 @@ function snap(p) {
 function guide(axis, at) {
   const g = document.createElement("div");
   g.className = "guide";
-  if (axis === "v") {
-    g.style.cssText = `left:${at * zoom}px;top:0;width:1px;height:100%`;
-  } else {
-    g.style.cssText = `top:${at * zoom}px;left:0;height:1px;width:100%`;
-  }
+  g.style.cssText = axis === "v"
+    ? `left:${at * zoom}px;top:0;width:1px;height:100%`
+    : `top:${at * zoom}px;left:0;height:1px;width:100%`;
   $("stage").appendChild(g);
 }
 const clearGuides = () => $("stage").querySelectorAll(".guide").forEach((g) => g.remove());
+
+/* ---------------------------------------------------------------- crop -- */
+/* The crop is stored as fractions of the element's own image, so it keeps
+   meaning at any box size (see tiles.crop_fractions). */
+function fullRect(p) {
+  const c = p.params.crop;
+  if (!c) return { x: p.x, y: p.y, w: p.w, h: p.h };
+  const [l, t, r, b] = c;
+  const fw = p.w / Math.max(1e-6, r - l);
+  const fh = p.h / Math.max(1e-6, b - t);
+  return { x: p.x - l * fw, y: p.y - t * fh, w: fw, h: fh };
+}
+
+function startCrop(p) {
+  cropping = { p, full: fullRect(p), rect: { x: p.x, y: p.y, w: p.w, h: p.h } };
+  const layer = document.createElement("div");
+  layer.id = "cropLayer";
+  layer.innerHTML = `<img class="cdim">
+    <div class="croprect"><img class="cfull"></div>`;
+  $("stage").appendChild(layer);
+  const src = `/api/element/${p.element}.png`;
+  layer.querySelector(".cdim").src = src;
+  layer.querySelector(".cfull").src = src;
+  handleEls(layer.querySelector(".croprect"));
+  layer.addEventListener("pointerdown", onCropDown);
+  syncBox(p);
+  paintCrop();
+  drawProps();
+}
+
+function paintCrop() {
+  const layer = $("cropLayer");
+  if (!layer || !cropping) return;
+  const { full, rect } = cropping;
+  Object.assign(layer.style, {
+    left: `${full.x * zoom}px`, top: `${full.y * zoom}px`,
+    width: `${full.w * zoom}px`, height: `${full.h * zoom}px`,
+  });
+  const r = layer.querySelector(".croprect");
+  Object.assign(r.style, {
+    left: `${(rect.x - full.x) * zoom}px`, top: `${(rect.y - full.y) * zoom}px`,
+    width: `${rect.w * zoom}px`, height: `${rect.h * zoom}px`,
+  });
+  Object.assign(r.querySelector(".cfull").style, {
+    left: `${-(rect.x - full.x) * zoom}px`, top: `${-(rect.y - full.y) * zoom}px`,
+    width: `${full.w * zoom}px`, height: `${full.h * zoom}px`,
+  });
+}
+
+let cropDrag = null;
+function onCropDown(e) {
+  const h = e.target.closest(".handle");
+  cropDrag = { dir: h ? h.dataset.dir : null, sx: e.clientX, sy: e.clientY,
+               o: { ...cropping.rect } };
+  e.target.setPointerCapture(e.pointerId);
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+document.addEventListener("pointermove", (e) => {
+  if (!cropDrag || !cropping) return;
+  const dx = (e.clientX - cropDrag.sx) / zoom;
+  const dy = (e.clientY - cropDrag.sy) / zoom;
+  const { full } = cropping;
+  const o = cropDrag.o;
+  let { x, y, w, h } = o;
+  if (!cropDrag.dir) { x = o.x + dx; y = o.y + dy; }
+  else {
+    if (cropDrag.dir.includes("e")) w = o.w + dx;
+    if (cropDrag.dir.includes("w")) { w = o.w - dx; x = o.x + dx; }
+    if (cropDrag.dir.includes("s")) h = o.h + dy;
+    if (cropDrag.dir.includes("n")) { h = o.h - dy; y = o.y + dy; }
+  }
+  w = Math.max(MIN, Math.min(w, full.w));
+  h = Math.max(MIN, Math.min(h, full.h));
+  cropping.rect = {
+    x: Math.max(full.x, Math.min(x, full.x + full.w - w)),
+    y: Math.max(full.y, Math.min(y, full.y + full.h - h)),
+    w, h,
+  };
+  paintCrop();
+});
+document.addEventListener("pointerup", () => { cropDrag = null; });
+
+function endCrop(apply) {
+  if (!cropping) return;
+  const { p, full, rect } = cropping;
+  if (apply) {
+    snapshot();
+    p.params.crop = [(rect.x - full.x) / full.w, (rect.y - full.y) / full.h,
+                     (rect.x + rect.w - full.x) / full.w,
+                     (rect.y + rect.h - full.y) / full.h];
+    Object.assign(p, { x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+    clampInside(p);
+    markDirty();
+  }
+  $("cropLayer")?.remove();
+  cropping = null;
+  cropDrag = null;
+  syncBox(p);
+  drawProps();
+}
+
+function resetCrop(p) {
+  snapshot();
+  const full = fullRect(p);
+  delete p.params.crop;
+  Object.assign(p, full);
+  clampInside(p);
+  syncBox(p);
+  drawProps();
+  markDirty();
+}
 
 /* -------------------------------------------------------------- layers -- */
 function drawLayers() {
@@ -297,6 +487,7 @@ function drawLayers() {
       <button class="eye" title="show / hide">${p.visible ? "◉" : "○"}</button>`;
     row.onclick = (e) => {
       if (e.target.classList.contains("eye")) {
+        snapshot();
         p.visible = !p.visible;
         syncBox(p); drawLayers(); markDirty();
       } else select(p.id);
@@ -322,6 +513,7 @@ function drawLayers() {
 /* Rows read top-down as top-most first, so "before" in the list means above. */
 function reorder(dragId, targetId, above) {
   if (dragId === targetId) return;
+  snapshot();
   const order = byZ();                                  // bottom -> top
   const moving = order.find((p) => p.id === dragId);
   const rest = order.filter((p) => p.id !== dragId);
@@ -340,6 +532,9 @@ function num(lbl, val, on, step = 1) {
            data-on="${on}"></div>`;
 }
 
+const bgIdFor = (p) => `bg-${p.id}`;
+const hasBackdrop = (p) => plan.placements.some((q) => q.id === bgIdFor(p));
+
 function drawProps() {
   const host = $("props");
   const p = sel();
@@ -347,6 +542,18 @@ function drawProps() {
     host.innerHTML = '<div class="hint">Select an element on the canvas.</div>';
     return;
   }
+  if (cropping) {
+    host.innerHTML = `<div class="prop"><label>cropping</label><b>${label(p)}</b></div>
+      <div class="hint">Drag the bright rectangle, or its handles, to choose the
+      part of the element to keep.</div>
+      <div class="rowbtns">
+        <button class="primary" data-do="cropApply">Apply crop</button>
+        <button data-do="cropCancel">Cancel</button>
+      </div>`;
+    wireProps(host, p);
+    return;
+  }
+
   let html = `<div class="prop"><label>name</label><b>${label(p)}</b></div>
               <div class="prop"><label>kind</label>${p.kind}${p.role ? " · " + p.role : ""}</div>
               <div class="divider"></div>`;
@@ -356,10 +563,16 @@ function drawProps() {
     ? `<div class="prop"><label>height</label><span class="lrole">auto (wraps)</span></div>`
       + num("line height", p.params.line_h || 12, "line_h")
       + `<div class="prop"><label>align</label>
-           <select data-on="align">${["left", "center", "right"].map((a) =>
+           <select data-on="align">${["left", "center", "right", "justify"].map((a) =>
              `<option ${p.params.align === a ? "selected" : ""}>${a}</option>`).join("")}
          </select></div>`
     : num("height", p.h, "h");
+
+  html += `<div class="prop"><label>opacity</label>
+      <input type="range" min="0" max="1" step="0.05" value="${p.opacity ?? 1}"
+             data-on="opacity" data-live="1">
+      <span class="lrole">${Math.round((p.opacity ?? 1) * 100)}%</span></div>`;
+
   if (p.kind === "color_bar") {
     const [r, g, b] = p.params.color;
     const hex = "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
@@ -374,6 +587,7 @@ function drawProps() {
     html += `<div class="prop"><label>lock aspect</label>
              <input type="checkbox" ${p.lock_aspect ? "checked" : ""} data-on="lock"></div>`;
   }
+
   html += `<div class="divider"></div><div class="rowbtns">
       <button data-do="centerH">Centre H</button>
       <button data-do="centerV">Centre V</button>
@@ -381,26 +595,58 @@ function drawProps() {
       <button data-do="top">Top</button>
       <button data-do="bottom">Bottom</button>
       <button data-do="hide">${p.visible ? "Hide" : "Show"}</button>
-    </div>
-    <div class="hint">Arrow keys nudge (Shift = 10px). [ and ] restack.</div>`;
-  host.innerHTML = html;
+    </div>`;
 
+  if (p.kind === "element") {
+    html += `<div class="divider"></div><div class="rowbtns">
+      <button data-do="backdrop">${hasBackdrop(p) ? "Remove backdrop" : "Background behind"}</button>`;
+    if (canCrop(p)) {
+      html += `<button data-do="crop">Crop…</button>`;
+      if (p.params.crop) html += `<button data-do="uncrop">Reset crop</button>`;
+    }
+    html += `</div>`;
+  }
+  html += `<div class="hint">Arrow keys nudge (Shift = 10px). [ and ] restack.
+           Ctrl+Z undo.</div>`;
+  host.innerHTML = html;
+  wireProps(host, p);
+}
+
+function wireProps(host, p) {
   host.querySelectorAll("[data-on]").forEach((inp) => {
-    inp.onchange = () => {
+    const commit = (live) => {
       const k = inp.dataset.on;
+      if (!live) snapshot();
       if (k === "lock") p.lock_aspect = inp.checked;
       else if (k === "color") p.params.color = hexToRgb(inp.value);
+      else if (k === "opacity") p.opacity = Number(inp.value);
       else if (["line_h", "align", "feather", "focus_y"].includes(k))
         p.params[k] = k === "align" ? inp.value : Number(inp.value);
       else p[k] = Number(inp.value);
       clampInside(p);
       syncBox(p);
-      markDirty();
+      if (!live) { drawProps(); markDirty(); }
+      else if (inp.nextElementSibling)
+        inp.nextElementSibling.textContent = `${Math.round(p.opacity * 100)}%`;
     };
+    if (inp.dataset.live) {
+      inp.oninput = () => commit(true);
+      inp.onchange = () => { markDirty(); };
+      inp.onpointerdown = () => snapshot();
+    } else {
+      inp.onchange = () => commit(false);
+    }
   });
+
   host.querySelectorAll("[data-do]").forEach((b) => {
     b.onclick = () => {
       const a = b.dataset.do;
+      if (a === "crop") return startCrop(p);
+      if (a === "cropApply") return endCrop(true);
+      if (a === "cropCancel") return endCrop(false);
+      if (a === "uncrop") return resetCrop(p);
+      if (a === "backdrop") return toggleBackdrop(p);
+      snapshot();
       if (a === "centerH") p.x = (plan.width - p.w) / 2;
       if (a === "centerV") p.y = (plan.height - p.h) / 2;
       if (a === "fullW") { p.x = 0; p.w = plan.width; }
@@ -413,19 +659,83 @@ function drawProps() {
   });
 }
 
+/* Put the master's own background imagery directly behind one element, as its
+   own placement — so it can then be moved, faded or feathered independently. */
+function toggleBackdrop(p) {
+  snapshot();
+  const id = bgIdFor(p);
+  if (hasBackdrop(p)) {
+    plan.placements = plan.placements.filter((q) => q.id !== id);
+    boxes.get(id)?.remove();
+    boxes.delete(id);
+  } else {
+    const at = p.z;                       // slot the backdrop directly beneath
+    for (const q of plan.placements) if (q.z >= at) q.z += 1;
+    plan.placements.push({
+      id, kind: "photo_band", x: p.x, y: p.y, w: p.w, h: p.h, z: at,
+      element: null, name: "", role: "", visible: true, lock_aspect: false,
+      opacity: 1, params: { feather: 0, focus_x: 0.5 },
+    });
+  }
+  normaliseZ();
+  rebuild();
+  markDirty();
+}
+
+function normaliseZ() {
+  byZ().forEach((p, i) => { p.z = i; });
+}
+
 const hexToRgb = (h) => [1, 3, 5].map((i) => parseInt(h.substr(i, 2), 16));
+
+/* ------------------------------------------------------- canvas resize -- */
+/* Changing the canvas rescales the whole layout: positions follow each axis,
+   aspect-locked graphics scale uniformly so they are never distorted, and type
+   size follows the smaller axis so text stays in proportion. */
+async function resizeCanvas(nw, nh) {
+  if (nw === plan.width && nh === plan.height) return;
+  const sx = nw / plan.width, sy = nh / plan.height, s = Math.min(sx, sy);
+  snapshot();
+  for (const p of plan.placements) {
+    p.x *= sx; p.y *= sy;
+    if (isText(p)) {
+      p.w *= sx; p.h *= sy;
+      p.params.line_h = Math.max(3, Math.round((p.params.line_h || 12) * s));
+    } else if (p.lock_aspect) {
+      p.w *= s; p.h *= s;
+    } else {
+      p.w *= sx; p.h *= sy;
+    }
+  }
+  plan.width = nw; plan.height = nh;
+  plan.placements.forEach(clampInside);
+
+  try {
+    await api("/api/formats", jsonReq("POST", { width: nw, height: nh }));
+    await api(`/api/plan/${nw}x${nh}`, jsonReq("PUT", plan));
+    location.href = `/edit/${nw}x${nh}`;
+  } catch (e) {
+    undo();
+    toast(e.message, true);
+  }
+}
 
 /* ------------------------------------------------------- persist/export -- */
 function markDirty() {
   $("editedBadge").hidden = false;
+  autosave();
+}
+
+function autosave() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(save, 1500);          // autosave; Save forces it now
+  saveTimer = setTimeout(save, 1500);          // Save forces it immediately
 }
 
 async function save() {
   clearTimeout(saveTimer);
   try {
-    await api(`/api/plan/${FMT}`, jsonReq("PUT", plan));
+    const d = await api(`/api/plan/${FMT}`, jsonReq("PUT", plan));
+    showWarnings(d.warnings);
     toast("layout saved");
   } catch (e) { toast(e.message, true); }
 }
@@ -438,7 +748,10 @@ async function renderBlob(download) {
 }
 
 $("save").onclick = save;
+$("undo").onclick = undo;
+$("redo").onclick = redo;
 $("zoom").oninput = (e) => setZoom(Number(e.target.value));
+$("resize").onclick = () => resizeCanvas(Number($("cw").value), Number($("ch").value));
 
 $("reset").onclick = async () => {
   if (!confirm(`Discard manual changes to ${FMT} and go back to the algorithm?`)) return;
@@ -447,7 +760,11 @@ $("reset").onclick = async () => {
 };
 
 $("explode").onclick = async () => {
-  await loadPlan(await api(`/api/plan/${FMT}/explode`, { method: "POST" }));
+  snapshot();
+  const d = await api(`/api/plan/${FMT}/explode`, { method: "POST" });
+  plan = d.plan;
+  showWarnings(d.warnings);
+  rebuild();
   markDirty();
   toast("exploded into per-element boxes");
 };
@@ -476,20 +793,32 @@ $("export").onclick = async () => {
 /* ------------------------------------------------------------ keyboard -- */
 document.addEventListener("keydown", (e) => {
   if (e.target.matches("input, select, textarea")) return;
-  if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); return save(); }
+  const ctrl = e.ctrlKey || e.metaKey;
+  if (ctrl && e.key.toLowerCase() === "z") {
+    e.preventDefault(); return e.shiftKey ? redo() : undo();
+  }
+  if (ctrl && e.key.toLowerCase() === "y") { e.preventDefault(); return redo(); }
+  if (ctrl && e.key.toLowerCase() === "s") { e.preventDefault(); return save(); }
+  if (cropping) {
+    if (e.key === "Enter") { e.preventDefault(); endCrop(true); }
+    if (e.key === "Escape") { e.preventDefault(); endCrop(false); }
+    return;
+  }
   const p = sel();
   if (!p) return;
-  const step = e.shiftKey ? 10 : 1;
-  const moves = { ArrowLeft: [-step, 0], ArrowRight: [step, 0],
-                  ArrowUp: [0, -step], ArrowDown: [0, step] };
+  const stepPx = e.shiftKey ? 10 : 1;
+  const moves = { ArrowLeft: [-stepPx, 0], ArrowRight: [stepPx, 0],
+                  ArrowUp: [0, -stepPx], ArrowDown: [0, stepPx] };
   if (moves[e.key]) {
     e.preventDefault();
+    snapshot();
     p.x += moves[e.key][0];
     p.y += moves[e.key][1];
     clampInside(p); syncBox(p); drawProps(); markDirty();
   } else if (e.key === "Escape") {
     select(null);
   } else if (e.key === "[" || e.key === "]") {
+    snapshot();
     const order = byZ();
     const i = order.indexOf(p);
     const j = e.key === "]" ? i + 1 : i - 1;
@@ -498,6 +827,7 @@ document.addEventListener("keydown", (e) => {
       paint(); markDirty();
     }
   } else if (e.key === "Delete" || e.key === "Backspace") {
+    snapshot();
     p.visible = !p.visible;
     syncBox(p); drawLayers(); drawProps(); markDirty();
   }

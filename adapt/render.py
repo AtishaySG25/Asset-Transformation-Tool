@@ -28,7 +28,8 @@ def placement_tile(p: Placement, source, scale: float = 1.0) -> Image.Image | No
                                    line_h=max(1, round(p.params.get("line_h", 12))),
                                    align=p.params.get("align", "left"),
                                    ss=int(scale))
-        return tiles.graphic_tile(el, round(p.w * scale), round(p.h * scale))
+        return tiles.graphic_tile(el, round(p.w * scale), round(p.h * scale),
+                                  crop=p.params.get("crop"))
 
     if p.kind == "photo_band":
         return tiles.photo_band_tile(
@@ -44,7 +45,7 @@ def placement_tile(p: Placement, source, scale: float = 1.0) -> Image.Image | No
 
     if p.kind == "base_image":
         src = source.background if p.params.get("src") == "background" else source.composite
-        crop = p.params.get("crop")
+        crop = p.params.get("crop_px")          # source pixels, not fractions
         if crop:
             src = src.crop(tuple(int(v) for v in crop))
         return src.resize((max(1, round(p.w * scale)),
@@ -74,6 +75,7 @@ def render_plan(plan: LayoutPlan, source, ss: int = 2) -> Image.Image:
         tile = p.tile if (ss == 1 and p.tile is not None) else placement_tile(p, source, ss)
         if tile is None or tile.width < 1 or tile.height < 1:
             continue
+        tile = tiles.with_opacity(tile, p.opacity)
         # A re-wrapped block is only as wide as its longest line, so it is aligned
         # inside its column box rather than pinned to the left edge.
         x = round(p.x * ss)

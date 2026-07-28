@@ -11,7 +11,14 @@
     <span id="tabs"></span>
     <span class="badge" id="strategy"></span>
     <span class="badge edited" id="editedBadge" hidden>edited</span>
+    <button id="undo" title="Undo (Ctrl+Z)" disabled>&#8630;</button>
+    <button id="redo" title="Redo (Ctrl+Y)" disabled>&#8631;</button>
     <span class="spacer"></span>
+    <label class="asset">canvas</label>
+    <input id="cw" type="number" min="16" max="8000" step="1" title="canvas width">
+    <span class="asset">&times;</span>
+    <input id="ch" type="number" min="16" max="8000" step="1" title="canvas height">
+    <button id="resize" title="Rescale the whole layout to a new size">Resize</button>
     <label class="asset">zoom</label>
     <input id="zoom" type="range" min="0.5" max="8" step="0.5" value="1">
     <span class="asset" id="zoomLabel">100%</span>
@@ -30,6 +37,7 @@
     </div>
 
     <div class="stage-wrap" id="stageWrap">
+      <div class="warnbox" id="warnings" hidden></div>
       <div class="stage" id="stage"></div>
       <div class="compare" id="compareBox" hidden>
         <div class="cap">server render — this is exactly what Export writes</div>
