@@ -134,6 +134,10 @@ dependency-free vanilla-JS front end — no CDN, works offline.
   box size.
 * **Undo/redo** (Ctrl+Z / Ctrl+Y, 120 deep) over everything — moves, resizes,
   crops, restacking, hiding, canvas resizes.
+* **The master stays in view.** The right-hand panel shows the PSD rasterised
+  (`/api/master.png`, scaled for the sidebar, click for full size) so the
+  original composition is always next to the one you are rearranging. It
+  collapses if you want the room back.
 * **Per format.** Moving something in `970x90` has no effect on `160x600`.
 * **Reset to algorithm** per format, **Show render** to see the true server
   render beside the canvas, **Export PNG** (single) and **Export all** (writes

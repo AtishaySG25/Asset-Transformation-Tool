@@ -14,6 +14,7 @@ Routes
 ``POST /api/open``               load a master asset (cached per process)
 ``GET  /api/manifest``           current asset: elements, formats, edited state
 ``GET  /api/element/<i>.png``    one extracted element, as extracted
+``GET  /api/master.png``         the master asset rasterised (``?w=`` to scale)
 ``GET  /api/tile.png``           stateless tile preview (drives live editing)
 ``POST /api/formats``            add a custom target size
 ``DELETE /api/formats/<fmt>``    remove a custom target size
@@ -35,6 +36,7 @@ import os
 import time
 
 import numpy as np
+from PIL import Image
 from flask import (Flask, abort, jsonify, render_template, request,
                    send_file, url_for)
 
@@ -214,6 +216,17 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
         if not 0 <= index < len(els):
             abort(404)
         return png(els[index].image, max_age=3600)
+
+    @app.get("/api/master.png")
+    def master_png():
+        """The master asset rasterised — the PSD as the designer drew it, for
+        reference while editing. ``?w=`` serves a scaled copy for the sidebar."""
+        img = session().source.composite
+        w = request.args.get("w", type=int)
+        if w and 0 < w < img.width:
+            img = img.resize((w, max(1, round(img.height * w / img.width))),
+                             Image.LANCZOS)
+        return png(img, max_age=3600)
 
     # -------------------------------------------------------------- tiles --
     @app.get("/api/tile.png")

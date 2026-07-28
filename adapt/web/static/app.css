@@ -102,11 +102,24 @@ header .spacer { flex: 1; }
   overflow-y: auto;
   flex: none;
 }
-.panel.right { border-right: none; border-left: 1px solid var(--line); width: 244px; }
+.panel.right { border-right: none; border-left: 1px solid var(--line); width: 288px; }
 .panel h2 {
   font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
   color: var(--muted); margin: 0; padding: 11px 12px 6px;
+  display: flex; align-items: center; gap: 8px;
 }
+.panel h2 .mini {
+  margin-left: auto; padding: 1px 7px; font-size: 10px; text-transform: none;
+  letter-spacing: 0;
+}
+
+/* The original PSD, rasterised — reference while rearranging its pieces. */
+#masterBox { padding: 0 12px 4px; }
+.master-img {
+  display: block; width: 100%; border: 1px solid var(--line);
+  border-radius: 4px; background: #fff;
+}
+#masterBox .hint { padding: 6px 0 0; }
 
 .layer {
   display: flex; align-items: center; gap: 7px;

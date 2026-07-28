@@ -210,6 +210,12 @@ def test_web_api_round_trip(source, tmp_path):
     # a tile for the first element renders
     assert c.get(f"/api/element/{man['elements'][0]['index']}.png").status_code == 200
 
+    # the master asset is served rasterised, full size and scaled for the sidebar
+    with Image.open(io.BytesIO(c.get("/api/master.png").data)) as im:
+        assert im.size == (man["width"], man["height"])
+    with Image.open(io.BytesIO(c.get("/api/master.png?w=320").data)) as im:
+        assert im.width == 320
+
     # posting the untouched plan back reproduces the stored render byte for byte
     a = c.get("/api/render/970x90.png").data
     b = c.post("/api/render/970x90.png", json=plan).data
