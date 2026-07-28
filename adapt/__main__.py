@@ -1,4 +1,5 @@
 import argparse
+import os
 
 from .pipeline import run
 
@@ -14,10 +15,24 @@ def main():
                    help="output directory")
     p.add_argument("--no-debug", action="store_true",
                    help="skip debug renders and montage")
+    p.add_argument("--use-layout", action="store_true",
+                   help="apply layouts hand-edited in the web editor "
+                        "(output/layouts/<name>.json) instead of the algorithmic ones")
+    p.add_argument("--serve", action="store_true",
+                   help="start the web layout editor instead of rendering")
+    p.add_argument("--port", type=int, default=8000, help="port for --serve")
+    p.add_argument("--host", default="127.0.0.1", help="interface for --serve")
     args = p.parse_args()
 
+    if args.serve:
+        from .web import serve
+        input_dir = args.input if os.path.isdir(args.input) else os.path.dirname(
+            args.input) or "input"
+        serve(input_dir, args.output, host=args.host, port=args.port)
+        return
+
     print(f"adapt: {args.input} -> {args.output}/")
-    run(args.input, args.output, debug=not args.no_debug)
+    run(args.input, args.output, debug=not args.no_debug, use_saved=args.use_layout)
     print("done.")
 
 

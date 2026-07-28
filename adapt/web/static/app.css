@@ -1,0 +1,157 @@
+:root {
+  --bg: #16181d;
+  --panel: #1e2128;
+  --panel-2: #262a33;
+  --line: #333846;
+  --text: #e6e8ee;
+  --muted: #949bab;
+  --accent: #e0457b;
+  --accent-2: #43b3d8;
+  --ok: #5bbf7a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
+}
+
+a { color: var(--accent-2); }
+
+button, select, input {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 5px 9px;
+}
+button { cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { filter: brightness(1.1); }
+button:disabled { opacity: .45; cursor: default; }
+input[type=number] { width: 72px; }
+
+/* ------------------------------------------------------------- chrome -- */
+header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+header h1 { font-size: 14px; margin: 0 8px 0 0; font-weight: 600; letter-spacing: .3px; }
+header .spacer { flex: 1; }
+.asset { color: var(--muted); }
+.asset b { color: var(--text); font-weight: 600; }
+
+.badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.badge.edited { color: #ffd479; border-color: #7a6330; background: #2a2416; }
+
+.toast {
+  position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+  background: var(--panel-2); border: 1px solid var(--line);
+  padding: 9px 16px; border-radius: 6px; opacity: 0;
+  transition: opacity .18s; pointer-events: none; z-index: 60;
+}
+.toast.show { opacity: 1; }
+.toast.err { border-color: var(--accent); color: #ffb9cf; }
+
+/* ------------------------------------------------------------ gallery -- */
+/* Cards size to their format, so the narrow sizes pack side by side and the
+   sheet reads like the montage contact sheet. */
+.gallery { padding: 18px; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 18px; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  max-width: 100%;
+}
+.card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.card-head b { font-size: 14px; }
+.card-head .spacer { flex: 1; }
+.shot {
+  background: repeating-conic-gradient(#20232a 0 25%, #191c22 0 50%) 50%/16px 16px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px;
+  overflow-x: auto;
+}
+.shot img { display: block; image-rendering: auto; }
+.empty { color: var(--muted); padding: 40px; text-align: center; }
+
+/* ------------------------------------------------------------- editor -- */
+.workspace { display: flex; height: calc(100vh - 53px); }
+.panel {
+  width: 232px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  flex: none;
+}
+.panel.right { border-right: none; border-left: 1px solid var(--line); width: 244px; }
+.panel h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
+  color: var(--muted); margin: 0; padding: 11px 12px 6px;
+}
+
+.layer {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 10px; cursor: pointer; border-left: 3px solid transparent;
+}
+.layer:hover { background: var(--panel-2); }
+.layer.sel { background: var(--panel-2); border-left-color: var(--accent); }
+.layer.hidden .lname { opacity: .4; text-decoration: line-through; }
+.layer.drop-before { box-shadow: inset 0 2px 0 var(--accent-2); }
+.layer.drop-after { box-shadow: inset 0 -2px 0 var(--accent-2); }
+.lname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lrole { font-size: 10px; color: var(--muted); }
+.eye { background: none; border: none; padding: 0 2px; color: var(--muted); font-size: 12px; }
+.grip { color: #4b5262; cursor: grab; }
+
+.stage-wrap { flex: 1; overflow: auto; padding: 28px; }
+/* The stage paints the plan's own base colour — the same fill the renderer
+   starts from — so what you edit on is what the export begins with. */
+.stage {
+  position: relative;
+  margin: 0 auto;
+  background-color: #fff;
+  outline: 1px solid var(--line);
+  box-shadow: 0 6px 28px rgba(0, 0, 0, .45);
+}
+.box { position: absolute; user-select: none; display: flex; align-items: flex-start; }
+.box img { display: block; width: 100%; height: 100%; pointer-events: none; }
+.box.sel { outline: 1px solid var(--accent); outline-offset: 0; }
+.box.outline { outline: 1px dashed #55607a; }
+.box.hidden { display: none; }
+
+.handle {
+  position: absolute; width: 9px; height: 9px; background: #fff;
+  border: 1px solid var(--accent); border-radius: 2px; z-index: 5;
+}
+.guide { position: absolute; background: var(--accent-2); z-index: 40; pointer-events: none; }
+
+.prop { display: flex; align-items: center; gap: 8px; padding: 4px 12px; }
+.prop label { width: 74px; color: var(--muted); }
+.prop input[type=number] { flex: 1; width: auto; }
+.hint { color: var(--muted); padding: 8px 12px; font-size: 12px; }
+.rowbtns { display: flex; gap: 6px; padding: 8px 12px; flex-wrap: wrap; }
+.rowbtns button { flex: 1; min-width: 68px; }
+.divider { height: 1px; background: var(--line); margin: 10px 0; }
+
+.compare { padding: 10px 0 0; }
+.compare img { display: block; outline: 1px solid var(--line); margin: 0 auto; }
+.compare .cap { color: var(--muted); text-align: center; padding: 6px; font-size: 12px; }

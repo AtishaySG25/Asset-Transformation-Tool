@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>adapt — {{ fmt }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body data-fmt="{{ fmt }}">
+  <header>
+    <a href="/">&larr; all sizes</a>
+    <span id="tabs"></span>
+    <span class="badge" id="strategy"></span>
+    <span class="badge edited" id="editedBadge" hidden>edited</span>
+    <span class="spacer"></span>
+    <label class="asset">zoom</label>
+    <input id="zoom" type="range" min="0.5" max="8" step="0.5" value="1">
+    <span class="asset" id="zoomLabel">100%</span>
+    <button id="explode" hidden title="Break the flat composite into per-element boxes">Explode elements</button>
+    <button id="reset">Reset to algorithm</button>
+    <button id="compare">Show render</button>
+    <button id="save" class="primary">Save</button>
+    <button id="export">Export PNG</button>
+  </header>
+
+  <div class="workspace">
+    <div class="panel">
+      <h2>Layers <span class="asset" style="text-transform:none">(top first)</span></h2>
+      <div id="layers"></div>
+      <div class="hint">Drag a row to change stacking. Click the eye to hide.</div>
+    </div>
+
+    <div class="stage-wrap" id="stageWrap">
+      <div class="stage" id="stage"></div>
+      <div class="compare" id="compareBox" hidden>
+        <div class="cap">server render — this is exactly what Export writes</div>
+        <img id="compareImg" alt="render">
+      </div>
+    </div>
+
+    <div class="panel right">
+      <h2>Properties</h2>
+      <div id="props"><div class="hint">Select an element on the canvas.</div></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="{{ url_for('static', filename='common.js') }}"></script>
+  <script src="{{ url_for('static', filename='editor.js') }}"></script>
+</body>
+</html>

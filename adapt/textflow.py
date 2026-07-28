@@ -65,11 +65,17 @@ def segment_words(rgba: Image.Image):
 
 def reflow_to_width(rgba: Image.Image, target_w: int, line_h: int,
                     align: str = "left", space_ratio: float = 0.32,
-                    line_gap_ratio: float = 0.22) -> Image.Image:
+                    line_gap_ratio: float = 0.22, ss: int = 1) -> Image.Image:
     """Re-wrap ``rgba`` word-by-word into a block no wider than ``target_w``.
 
-    ``line_h`` sets the rendered line height in px (drives overall text size).
+    ``line_h`` sets the line height in px (drives overall text size).
     Returns a transparent RGBA block sized to the wrapped text.
+
+    ``ss`` supersamples the *rasterisation* only: the line breaks are always
+    decided at ``target_w``/``line_h``, then drawn ``ss`` x larger. Deciding the
+    wrap once and drawing it at any resolution is what keeps a layout stable —
+    otherwise sub-pixel rounding at render scale can push a word onto a new line
+    and silently change a layout that was measured at 1x.
     """
     words = segment_words(rgba)
     if not words:
@@ -84,31 +90,40 @@ def reflow_to_width(rgba: Image.Image, target_w: int, line_h: int,
         scale = target_w / widest
     line_h = max(1, round(natural_h * scale))
     space = max(1, int(space_ratio * line_h))
-    line_gap = max(1, int(line_gap_ratio * line_h))
 
-    scaled = []
-    for w in words:
-        nw = max(1, round(w["w"] * scale))
-        nh = max(1, round(w["h"] * scale))
-        scaled.append((w["img"].resize((nw, nh), Image.LANCZOS), nw, nh))
-
-    # Greedy word wrap.
+    # Layout pass: integer word extents at 1x decide the line breaks. Integers
+    # (not floats) on purpose — the resulting block width is then exactly the
+    # sum this loop compared against, so re-wrapping a block at its own measured
+    # width reproduces it identically. Layout plans depend on that: a saved box
+    # width must always re-render as the same lines.
     lines, cur, cur_w = [], [], 0
-    for img, nw, nh in scaled:
+    for i, w in enumerate(words):
+        nw = max(1, round(w["w"] * scale))
         add = nw if not cur else space + nw
         if cur and cur_w + add > target_w:
             lines.append(cur)
             cur, cur_w = [], 0
             add = nw
-        cur.append((img, nw, nh))
+        cur.append(i)
         cur_w += add
     if cur:
         lines.append(cur)
 
-    line_h_each = [max(nh for _, _, nh in ln) for ln in lines]
-    line_w_each = [sum(nw for _, nw, _ in ln) + space * (len(ln) - 1) for ln in lines]
-    block_w = min(target_w, max(line_w_each))
-    block_h = sum(line_h_each) + line_gap * (len(lines) - 1)
+    # Raster pass: same breaks, drawn at ss x.
+    rs = scale * ss
+    space_r = max(1, int(space_ratio * line_h * ss))
+    gap_r = max(1, int(line_gap_ratio * line_h * ss))
+    sized = []
+    for w in words:
+        nw = max(1, round(w["w"] * rs))
+        nh = max(1, round(w["h"] * rs))
+        sized.append((w["img"].resize((nw, nh), Image.LANCZOS), nw, nh))
+
+    line_h_each = [max(sized[i][2] for i in ln) for ln in lines]
+    line_w_each = [sum(sized[i][1] for i in ln) + space_r * (len(ln) - 1)
+                   for ln in lines]
+    block_w = max(line_w_each)          # never clipped: the widest line always fits
+    block_h = sum(line_h_each) + gap_r * (len(lines) - 1)
 
     canvas = Image.new("RGBA", (max(1, block_w), max(1, block_h)), (0, 0, 0, 0))
     y = 0
@@ -119,8 +134,9 @@ def reflow_to_width(rgba: Image.Image, target_w: int, line_h: int,
             x = block_w - lw
         else:
             x = 0
-        for img, nw, nh in ln:
+        for i in ln:
+            img, nw, nh = sized[i]
             canvas.alpha_composite(img, (max(0, x), y + (lh - nh) // 2))
-            x += nw + space
-        y += lh + line_gap
+            x += nw + space_r
+        y += lh + gap_r
     return canvas

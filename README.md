@@ -64,6 +64,74 @@ counteract it: the banner/skyscraper layouts are composed at **2× supersampling
 and downscaled once (`reflow(..., ss=2)`), and every output gets a final
 **unsharp mask** (`pipeline._sharpen`).
 
+## Layout plans, and the manual editor
+
+The layout engine does not paint pixels. It emits a **`LayoutPlan`**
+(`adapt/layout.py`): a base colour plus an ordered list of `Placement` boxes in
+*output pixel* coordinates. `adapt/render.py::render_plan` is the only thing that
+rasterises, and `adapt/tiles.py` is the only thing that turns an element into a
+tile. So there is exactly one code path from a layout to a PNG:
+
+```
+psd_source.load ─▶ plan_for_format ─▶ LayoutPlan ─▶ render_plan ─▶ exact-size PNG
+                                          │
+                                     (JSON on disk)
+                                          │
+                                     web editor  ◀── drag / resize / restack
+```
+
+Because a plan is plain JSON, it round-trips: a hand-adjusted layout renders
+through the same renderer as the algorithmic one, and therefore inherits the same
+exact-dimension and no-clipping guarantees. This is asserted in the tests — a
+plan sent through `to_json`/`from_json` renders **byte-identically**.
+
+### Placement kinds
+
+| kind | what it draws |
+|------|----------------|
+| `element` | one extracted element. `params.mode` is `reflow` (text re-wrapped to the box width) or `stretch` (scaled to the box) |
+| `photo_band` | the background, cover-filled into the box, optionally alpha-feathered |
+| `color_bar` | a solid rectangle (footer bar, disclaimer strip) |
+| `base_image` | a full-frame image from the composite (the `fit` and `photo` strategies) |
+
+### Wrapping must be reproducible
+
+A re-wrapped text box is described by **(width, line height)** alone — its height
+is emergent. For a saved layout to re-render as the layout you saved, wrapping a
+block at its own measured width has to reproduce it exactly, so `textflow`
+separates the two halves of the job: line breaks are always decided at 1× using
+**integer** word extents, and only the rasterisation is supersampled (`ss`).
+Deciding breaks at render scale instead lets sub-pixel rounding push a word onto
+a new line and silently change a layout that was measured at 1×.
+
+### The editor
+
+`python run.py --serve` starts a local Flask app (`adapt/web/`) with a
+dependency-free vanilla-JS front end — no CDN, works offline.
+
+* **Gallery** (`/`) — pick a master asset (or drag one in), see all six formats
+  rendered at native size, jump into any one.
+* **Editor** (`/edit/970x90`) — the format at its exact pixel dimensions, every
+  placement a draggable/resizable box. Layers panel for stacking (drag to
+  reorder) and visibility; properties panel for numeric x/y/w/h, line height,
+  alignment, bar colour, band feather/focus. Edge and centre **snapping**, arrow
+  key nudging, `[` / `]` restacking. Nothing may leave the frame — the editor
+  clamps exactly as the renderer does.
+* **Text behaves like text.** Dragging a text box's side re-wraps it through
+  `textflow` on the server and returns the real block; dragging top/bottom
+  changes the type size. Glyphs are never stretched.
+* **Per format.** Moving something in `970x90` has no effect on `160x600`.
+* **Reset to algorithm** per format, **Show render** to see the true server
+  render beside the canvas, **Export PNG** (single) and **Export all** (writes
+  `output/`).
+* **Explode elements** — the near-square formats default to scaling the flat
+  composite (which preserves PSD layer effects); this button breaks that into one
+  box per element when you actually want to re-arrange them.
+
+Edits autosave to `output/layouts/<master>.json` and are re-applied headlessly by
+`python run.py --use-layout`, so the editor is not a dead end: what you arrange by
+hand stays part of the reproducible build.
+
 ## The approach: Hybrid (layer-aware + OpenCV)
 
 The PSD is cleanly layered with semantically-named groups, so we get element
@@ -146,6 +214,13 @@ pip install -r requirements.txt
 python run.py
 # or
 python -m adapt --input input/Axis.psd --output output --no-debug
+
+# manual layout editor at http://127.0.0.1:8000
+python run.py --serve
+python run.py --serve --port 8080 --input input --output output
+
+# re-render, applying any layouts hand-edited in the editor
+python run.py --use-layout
 ```
 
 Outputs land in `output/` as `<w>x<h>.png`. With debug on (default) you also get:
@@ -172,8 +247,13 @@ adapt/
   smartcrop.py    saliency-weighted content-aware crop (near-square)
   textflow.py     CV text word-segmentation + re-wrapping (no fonts)
   background.py   cover-fill to exact canvas (no padding)
-  reflow.py       content-preserving element reflow for banners & skyscraper
+  layout.py       LayoutPlan / Placement — the layout as data (JSON)
+  tiles.py        placement -> pixels; the only rasteriser
+  render.py       LayoutPlan -> exact-size image
+  reflow.py       content-preserving element reflow -> a plan
+  store.py        hand-edited layouts on disk (output/layouts/<master>.json)
   pipeline.py     orchestration, routing, saving, debug/montage
+  web/            Flask layout editor (templates/ + static/, no JS deps)
 run.py            convenience entry point (== python -m adapt)
 view_psd.py       PSD inspector: composite + per-layer PNG export
 tests/            pytest suite
@@ -192,6 +272,12 @@ Covers aspect-based routing, the photo-only fallback path, role extraction from
 the PSD, importance-map shape and range, exact-dimension guarantees for every
 format, CV text re-wrapping, and the flat-image contour fallback.
 
+Plus the guarantees the editor rests on: a plan survives a JSON round-trip
+**byte-identically**, every re-wrapped text box re-renders to exactly the box the
+plan recorded, hand-edited layouts persist and reload, and the whole web API
+(open → plan → tile → edit → save → reset → explode → render) round-trips through
+Flask's test client.
+
 Tests that need the master PSD skip cleanly when it is absent, so a fresh clone
 without `input/Axis.psd` still runs the routing and pure-CV tests.
 
@@ -207,6 +293,13 @@ without `input/Axis.psd` still runs the routing and pure-CV tests.
   cropping, so near-square outputs carry a small amount of anisotropic
   distortion. This was the deliberate trade for keeping every element and
   filling the frame with no side gaps.
+* **PSD layer effects are lost by per-layer extraction.** `psd_tools` renders a
+  layer's *own* pixels, so an effect drawn outside them — the CTA pill's stroke,
+  for instance — appears in the flattened composite but not in the extracted
+  element. This is why the near-square formats scale the flat composite by
+  default and only **Explode elements** on request: exploding trades that
+  fidelity for per-element control. It affects the reflow banners too, where the
+  stroke is simply absent.
 * The flat-JPEG path recovers salient objects but cannot recover semantic roles
   or re-wrap text; results there are best-effort versus the layer-aware PSD path.
 * Role classification is keyword-based, so a master using very different layer

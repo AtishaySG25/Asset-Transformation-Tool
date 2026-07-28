@@ -3,6 +3,7 @@
 Tests that need the layered master are skipped when it is absent (it is a large
 binary kept out of the repo); the pure-CV and routing tests always run.
 """
+import io
 import os
 
 import numpy as np
@@ -125,6 +126,109 @@ def test_structured_source_does_not_take_photo_path():
 
     assert effective_strategy(src, Format(200, 200)) == "crop"
     assert effective_strategy(src, Format(970, 90)) == "reflow"
+
+
+def test_plan_json_roundtrip_renders_identically(source):
+    # A plan is the contract between the layout engine, the editor and the
+    # exporter: sending it through JSON must not change a single pixel.
+    from adapt.layout import LayoutPlan
+    from adapt.pipeline import plan_for_format, render
+    from adapt import saliency as sal
+
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+    for fmt in FORMATS:
+        plan = plan_for_format(source, fmt, imp)
+        direct = render(plan, source)
+        revived = render(LayoutPlan.from_json(plan.to_json()), source)
+        assert revived.size == (fmt.width, fmt.height)
+        assert np.array_equal(np.array(direct), np.array(revived)), fmt.name
+
+
+def test_text_boxes_reproduce_their_own_wrap(source):
+    # Every re-wrapped text placement must re-render to exactly the box the plan
+    # recorded — otherwise a saved layout would drift each time it is opened.
+    from adapt.pipeline import plan_for_format
+    from adapt import tiles
+    from adapt.layout import resolve_element
+    from adapt import saliency as sal
+
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+    checked = 0
+    for fmt in FORMATS:
+        for p in plan_for_format(source, fmt, imp).placements:
+            if p.params.get("mode") != "reflow":
+                continue
+            el = resolve_element(source, p)
+            tile = tiles.text_tile(el, round(p.w), p.params["line_h"],
+                                   align=p.params.get("align", "left"))
+            assert (tile.width, tile.height) == (round(p.w), round(p.h)), \
+                f"{fmt.name}/{p.id}: {tile.size} != {(round(p.w), round(p.h))}"
+            checked += 1
+    assert checked, "no re-wrapped text found to check"
+
+
+def test_manual_edits_survive_a_save_and_reload(source, tmp_path):
+    # The editor's persistence path: move something, save, reload, re-render.
+    from adapt import store
+    from adapt.pipeline import plan_for_format, render
+    from adapt import saliency as sal
+
+    fmt = FORMATS[0]
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+    plan = plan_for_format(source, fmt, imp)
+    moved = next(p for p in plan.placements if p.kind == "element")
+    moved.x, moved.y = 7, 3
+    store.save("input/Axis.psd", {fmt.name: plan}, str(tmp_path))
+
+    back = store.load("input/Axis.psd", str(tmp_path))[fmt.name]
+    p2 = back.by_id(moved.id)
+    assert (p2.x, p2.y) == (7, 3)
+    out = render(back, source)
+    assert out.size == (fmt.width, fmt.height)
+
+
+def test_web_api_round_trip(source, tmp_path):
+    # Smoke-test the editor's own contract end to end through Flask.
+    from adapt.web import create_app
+    app = create_app("input", str(tmp_path))
+    c = app.test_client()
+
+    assert c.get("/api/plan/970x90").status_code == 409      # nothing open yet
+    assert c.post("/api/open", json={"path": INPUT}).status_code == 200
+
+    man = c.get("/api/manifest").get_json()
+    assert len(man["formats"]) == len(FORMATS)
+    assert man["elements"] and all("role" in e for e in man["elements"])
+
+    body = c.get("/api/plan/970x90").get_json()
+    plan = body["plan"]
+    assert body["edited"] is False and plan["placements"]
+
+    # a tile for the first element renders
+    assert c.get(f"/api/element/{man['elements'][0]['index']}.png").status_code == 200
+
+    # posting the untouched plan back reproduces the stored render byte for byte
+    a = c.get("/api/render/970x90.png").data
+    b = c.post("/api/render/970x90.png", json=plan).data
+    assert a == b
+
+    # edit -> save -> persisted -> reset
+    plan["placements"][1]["x"] = 123
+    assert c.put("/api/plan/970x90", json=plan).get_json()["edited"] is True
+    assert os.path.exists(tmp_path / "layouts" / "Axis.json")
+    assert c.get("/api/plan/970x90").get_json()["plan"]["placements"][1]["x"] == 123
+    assert c.post("/api/plan/970x90/reset").get_json()["edited"] is False
+
+    # a near-square format can be broken into per-element boxes on demand
+    ex = c.post("/api/plan/300x250/explode").get_json()["plan"]
+    assert ex["strategy"] == "explode"
+    assert len(ex["placements"]) == len(man["elements"]) + 1
+
+    with Image.open(io.BytesIO(c.get("/api/render/300x250.png").data)) as im:
+        assert im.size == (300, 250)
 
 
 def test_detect_objects_flat_fallback():

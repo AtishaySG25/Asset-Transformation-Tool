@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>adapt — layout editor</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header>
+    <h1>adapt</h1>
+    <select id="sources"></select>
+    <button id="open">Open</button>
+    <label class="badge" style="cursor:pointer">
+      upload<input id="upload" type="file" accept=".psd,.png,.jpg,.jpeg" hidden>
+    </label>
+    <span class="spacer"></span>
+    <span class="asset" id="asset"></span>
+    <button id="export">Export all to output/</button>
+  </header>
+
+  <div class="gallery" id="gallery">
+    <div class="empty">Pick a master asset and press <b>Open</b>.</div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="{{ url_for('static', filename='common.js') }}"></script>
+  <script src="{{ url_for('static', filename='gallery.js') }}"></script>
+</body>
+</html>
