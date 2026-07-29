@@ -15,6 +15,7 @@
     </label>
     <span class="spacer"></span>
     <span class="asset" id="asset"></span>
+    <button id="scale" title="Preview at actual pixel size, or scaled to fit">1:1</button>
     <span class="sizeform">
       <label class="asset">add size</label>
       <input id="nw" type="number" min="16" max="8000" placeholder="w">
@@ -25,8 +26,23 @@
     <button id="export">Export all to output/</button>
   </header>
 
-  <div class="gallery" id="gallery">
-    <div class="empty">Pick a master asset and press <b>Open</b>.</div>
+  <div class="gallery-wrap">
+    <div class="gallery-cols" id="gallery">
+      <div class="empty">Pick a master asset and press <b>Open</b>.</div>
+    </div>
+
+    <aside class="panel right">
+      <h2>Master
+        <button class="mini" id="masterToggle" title="show / hide the original">hide</button>
+      </h2>
+      <div id="masterBox">
+        <a id="masterLink" href="/api/master.png" target="_blank"
+           title="open the full-size render in a new tab">
+          <img class="master-img" id="master" alt="the master asset">
+        </a>
+        <div class="hint" id="masterCap"></div>
+      </div>
+    </aside>
   </div>
 
   <div class="toast" id="toast"></div>

@@ -30,9 +30,11 @@ Routes
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
+import threading
 import time
 
 import numpy as np
@@ -41,7 +43,7 @@ from flask import (Flask, abort, jsonify, render_template, request,
                    send_file, url_for)
 
 from .. import formats as formats_mod
-from .. import saliency, store
+from .. import log, saliency, store
 from ..formats import FORMATS, Format
 from ..layout import LayoutPlan, Placement
 from ..pipeline import (_bgr, effective_strategy, plan_explode, plan_for_format,
@@ -59,12 +61,38 @@ class Session:
         self.path = path
         self.out_dir = out_dir
         self.source = load(path)
-        self.importance = saliency.importance_map(_bgr(self.source.composite),
-                                                  self.source.elements)
+        with log.step("importance map (saliency + edges + element boxes)") as s:
+            self.importance = saliency.importance_map(_bgr(self.source.composite),
+                                                      self.source.elements)
+            s["note"] = f"{self.importance.shape[1]}x{self.importance.shape[0]}"
         self.saved = store.load(path, out_dir)          # hand-edited, from disk
         self.custom = store.load_custom(path, out_dir)  # user-added target sizes
         self.auto: dict[str, LayoutPlan] = {}           # algorithmic, memoised
         self.rev = int(time.time())                     # cache-buster for renders
+        # The gallery asks for every format at once. Building and rendering them
+        # one at a time keeps peak memory to a single canvas instead of eight,
+        # which matters far more than the wall-clock difference.
+        self.lock = threading.Lock()
+        self._renders: dict[str, bytes] = {}
+        if self.saved:
+            log.log(f"manual layouts on disk: {', '.join(sorted(self.saved))}", 1)
+        if self.custom:
+            log.log(f"custom sizes: {', '.join(f.name for f in self.custom)}", 1)
+
+    # -- render cache -----------------------------------------------------
+    def cached_render(self, name: str, plan: LayoutPlan, make):
+        """Renders are pure functions of (format, plan), so cache them by hash —
+        revisiting the gallery should not re-render anything."""
+        key = f"{name}:{hashlib.sha1(json.dumps(plan.to_json(), sort_keys=True).encode()).hexdigest()}"
+        hit = self._renders.get(key)
+        if hit is not None:
+            log.log(f"render {name}: cache hit ({len(hit) // 1024} KB)", 1)
+            return hit
+        data = make()
+        if len(self._renders) > 24:                  # keep the cache bounded
+            self._renders.pop(next(iter(self._renders)))
+        self._renders[key] = data
+        return data
 
     # -- formats ----------------------------------------------------------
     def all_formats(self) -> list[Format]:
@@ -95,8 +123,10 @@ class Session:
     # -- plans ------------------------------------------------------------
     def auto_plan(self, name: str) -> LayoutPlan:
         if name not in self.auto:
-            self.auto[name] = plan_for_format(self.source, self.fmt(name),
-                                              self.importance)
+            with self.lock:
+                if name not in self.auto:            # another thread may have won
+                    self.auto[name] = plan_for_format(self.source, self.fmt(name),
+                                                      self.importance)
         return self.auto[name]
 
     def plan(self, name: str) -> LayoutPlan:
@@ -106,11 +136,13 @@ class Session:
         self.saved[name] = plan
         self.rev += 1
         self._persist()
+        log.log(f"saved manual layout for {name} ({len(plan.placements)} placements)")
 
     def reset(self, name: str):
         self.saved.pop(name, None)
         self.rev += 1
         self._persist()
+        log.log(f"reset {name} to the algorithmic layout")
 
     def _persist(self):
         store.save(self.path, self.saved, self.custom, self.out_dir)
@@ -142,6 +174,32 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
     app = Flask(__name__)
     app.config.update(INPUT_DIR=input_dir, OUT_DIR=out_dir, MAX_CONTENT_LENGTH=512 << 20)
     state: dict[str, Session] = {}
+
+    # ------------------------------------------------------------ logging --
+    # One line in, one line out, with the duration — so a slow or failed preview
+    # is attributable to a specific request rather than guessed at.
+    @app.before_request
+    def _started():
+        request.environ["adapt.t0"] = time.time()
+
+    @app.after_request
+    def _finished(resp):
+        if request.path.startswith("/api/"):
+            dt = time.time() - request.environ.get("adapt.t0", time.time())
+            size = resp.calculate_content_length() or 0
+            log.log(f"{request.method} {request.full_path.rstrip('?')} "
+                    f"-> {resp.status_code} in {dt:.2f}s, {size // 1024} KB")
+        return resp
+
+    @app.errorhandler(Exception)
+    def _failed(err):
+        from werkzeug.exceptions import HTTPException
+        if isinstance(err, HTTPException):
+            log.log(f"{request.method} {request.path} -> {err.code} {err.description}")
+            return jsonify(message=err.description), err.code
+        log.log(f"{request.method} {request.path} -> 500 {type(err).__name__}: {err}")
+        app.logger.exception(err)
+        return jsonify(message=f"{type(err).__name__}: {err}"), 500
 
     # ------------------------------------------------------------ helpers --
     def session() -> Session:
@@ -329,23 +387,39 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
                         "warnings": review(plan, s.source)})
 
     # ------------------------------------------------------------ renders --
-    def _render(fmt: str, plan: LayoutPlan):
+    def _render_bytes(fmt: str, plan: LayoutPlan) -> bytes:
+        """PNG bytes for a plan, serialised against other heavy work and cached."""
         s = session()
         f = s.fmt(fmt)
-        img = render_image(plan, s.source)
-        assert img.size == (f.width, f.height), f"size mismatch for {fmt}"
-        return img
+
+        def make():
+            with s.lock:
+                img = render_image(plan, s.source)
+            assert img.size == (f.width, f.height), f"size mismatch for {fmt}"
+            buf = io.BytesIO()
+            img.save(buf, "PNG")
+            return buf.getvalue()
+
+        return s.cached_render(fmt, plan, make)
+
+    def png_bytes(data: bytes, download_name: str | None = None):
+        resp = send_file(io.BytesIO(data), mimetype="image/png",
+                         as_attachment=bool(download_name),
+                         download_name=download_name)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     @app.get("/api/render/<fmt>.png")
     def api_render(fmt):
         s = session()
-        return png(_render(fmt, s.plan(fmt)))
+        return png_bytes(_render_bytes(fmt, s.plan(fmt)))
 
     @app.post("/api/render/<fmt>.png")
     def api_render_posted(fmt):
         plan = LayoutPlan.from_json(request.get_json())
         download = request.args.get("download")
-        return png(_render(fmt, plan), download_name=f"{fmt}.png" if download else None)
+        return png_bytes(_render_bytes(fmt, plan),
+                         download_name=f"{fmt}.png" if download else None)
 
     @app.post("/api/export")
     def api_export():
@@ -353,11 +427,12 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
         out = app.config["OUT_DIR"]
         os.makedirs(out, exist_ok=True)
         written = []
-        for f in s.all_formats():
-            img = _render(f.name, s.plan(f.name))
-            path = os.path.join(out, f"{f.name}.png")
-            img.save(path)
-            written.append(path.replace("\\", "/"))
+        with log.step(f"export {len(s.all_formats())} formats to {out}"):
+            for f in s.all_formats():
+                path = os.path.join(out, f"{f.name}.png")
+                with open(path, "wb") as fh:
+                    fh.write(_render_bytes(f.name, s.plan(f.name)))
+                written.append(path.replace("\\", "/"))
         return jsonify({"written": written,
                         "layouts": store.path_for(s.path, out).replace("\\", "/")})
 

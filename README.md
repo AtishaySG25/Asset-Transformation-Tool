@@ -112,8 +112,11 @@ a new line and silently change a layout that was measured at 1×.
 `python run.py --serve` starts a local Flask app (`adapt/web/`) with a
 dependency-free vanilla-JS front end — no CDN, works offline.
 
-* **Gallery** (`/`) — pick a master asset (or drag one in), see all six formats
-  rendered at native size, jump into any one.
+* **Gallery** (`/`) — pick a master asset (or drag one in) and see every format,
+  grouped by shape: banners in one column, squares and skyscrapers in the other,
+  with the rasterised master pinned to the right. Custom sizes file themselves
+  into a group by aspect ratio, so the grouping needs no list to maintain.
+  Previews scale to fit their column; the **1:1** toggle shows actual pixels.
 * **Editor** (`/edit/970x90`) — the format at its exact pixel dimensions, every
   placement a draggable/resizable box. Layers panel for stacking (drag to
   reorder) and visibility; properties panel for numeric x/y/w/h, line height,
@@ -134,9 +137,9 @@ dependency-free vanilla-JS front end — no CDN, works offline.
   box size.
 * **Undo/redo** (Ctrl+Z / Ctrl+Y, 120 deep) over everything — moves, resizes,
   crops, restacking, hiding, canvas resizes.
-* **The master stays in view.** The right-hand panel shows the PSD rasterised
-  (`/api/master.png`, scaled for the sidebar, click for full size) so the
-  original composition is always next to the one you are rearranging. It
+* **The master stays in view.** Both pages carry a right-hand panel showing the
+  PSD rasterised (`/api/master.png`, scaled for the sidebar, click for full size)
+  so the original composition is always next to the one you are rearranging. It
   collapses if you want the room back.
 * **Per format.** Moving something in `970x90` has no effect on `160x600`.
 * **Reset to algorithm** per format, **Show render** to see the true server
@@ -170,6 +173,63 @@ guaranteed-complete starting point to arrange by hand.
 follow each axis, aspect-locked graphics scale uniformly so they are never
 distorted, and type size follows the smaller axis. The result is saved as a
 custom size of its own, leaving the original untouched.
+
+## Working at a sane resolution
+
+Masters can be far bigger than anything they produce. The Women's Day sample is
+6482×3646 — 24 megapixels — while the largest output is 1200px wide. Carrying
+that resolution through every resize is what made the tool crawl on an 8 GB
+laptop, so `psd_source` decides a **working scale** up front (`MAX_WORK_DIM`,
+2400px, override with `--max-dim`) and composites straight into it. Masters at or
+below that size are untouched, so the six standard outputs are byte-identical to
+before.
+
+A second cost is compositing itself: a `background` *group* stacking seven
+full-canvas sub-layers allocates a float buffer per layer. That one is rendered
+in **horizontal bands** (`_composite_scaled(..., band=True)`), which is both
+lighter and faster. Banding is opt-in and applied only there — ordinary layers
+can render differently under a partial viewport, since effects and smart-object
+resampling are resolved against it, and `PSDImage.composite()` ignores the
+viewport altogether (it returns the embedded preview, which is detected and
+falls back to a single pass rather than tiling the image down the canvas).
+
+Measured on that 24-megapixel master, per preview pass:
+
+| | before | after |
+|---|---|---|
+| resident memory, working | 551 MB | **178 MB** |
+| importance map | 13.1 s | **0.9 s** |
+| render, per format | 2.0–4.5 s | **0.4–1.3 s** (4 ms cached) |
+| load | 41.5 s | **31 s** |
+| peak during load | 2.70 GB | **2.21 GB** |
+
+The remaining peak is `psd_tools` compositing a single 15-megapixel smart-object
+layer at the file's own resolution — outside this tool's control, transient, and
+now called out in the log so it is not a mystery.
+
+The editor also renders **one format at a time** (a lock plus a plan-hash render
+cache) and the gallery requests previews sequentially. Eight parallel renders of
+a master that size was what made previews fail to appear at all.
+
+## Logging
+
+Every stage prints what it is doing, how long it took and the process's resident
+memory, so a slow load or a missing preview is attributable rather than guessed
+at:
+
+```
+[   1.57s    157MB]   master is 6482x3646; compositing at working scale x0.370 -> 2400x1350
+[   7.37s    214MB] composite 6482x3646 done in 5.80s
+[  19.35s    230MB]   background layer 'Background'
+[  34.75s    247MB]   element 'image' -> object 1524x1350 at (0, 0, 1524, 1350) (8MB)
+[  38.52s    158MB] importance map done in 0.85s  2400x1350
+[  38.94s    159MB]   plan 970x90 (reflow) done in 0.44s  5 placements
+[  39.15s    160MB]   render 970x90 (ss=2) done in 0.21s
+```
+
+The web server logs every API call the same way (`GET /api/render/970x90.png ->
+200 in 0.42s, 68 KB`), including cache hits and failures. Silence it with
+`--quiet` or `ADAPT_QUIET=1`.
 
 ## The approach: Hybrid (layer-aware + OpenCV)
 
@@ -286,6 +346,7 @@ adapt/
   smartcrop.py    saliency-weighted content-aware crop (near-square)
   textflow.py     CV text word-segmentation + re-wrapping (no fonts)
   background.py   cover-fill to exact canvas (no padding)
+  log.py          timed, memory-annotated progress log
   layout.py       LayoutPlan / Placement — the layout as data (JSON)
   tiles.py        placement -> pixels; the only rasteriser
   render.py       LayoutPlan -> exact-size image

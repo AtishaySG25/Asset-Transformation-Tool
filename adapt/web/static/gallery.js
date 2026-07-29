@@ -1,9 +1,17 @@
-/* Gallery: pick a master asset, see every format, jump into one to edit.
-   Custom sizes are added here and go through the same layout engine; the
-   feasibility warnings come from adapt.pipeline.review. */
+/* Gallery: pick a master asset, see every format grouped by shape, jump into one
+   to edit. Custom sizes are added here and go through the same layout engine;
+   the feasibility warnings come from adapt.pipeline.review. */
 
 const $ = (id) => document.getElementById(id);
 let manifest = null;
+let actualSize = false;
+
+/* Banners on one side; squares and skyscrapers on the other. Grouped by shape
+   rather than by a fixed list, so custom sizes file themselves. */
+const GROUPS = [
+  { key: "banner", title: "Banners", match: (f) => family(f) === "banner" },
+  { key: "block", title: "Squares & skyscrapers", match: (f) => family(f) !== "banner" },
+];
 
 async function refreshSources() {
   const { sources, current } = await api("/api/sources");
@@ -15,7 +23,7 @@ async function refreshSources() {
   return current;
 }
 
-function card(f, rev) {
+function card(f) {
   const el = document.createElement("div");
   el.className = "card";
   el.dataset.fmt = f.name;
@@ -30,8 +38,10 @@ function card(f, rev) {
       <a href="/edit/${f.name}"><button>Edit layout</button></a>
     </div>
     <div class="warnbox" hidden></div>
-    <div class="shot"><img src="/api/render/${f.name}.png?rev=${rev}"
-         width="${f.width}" height="${f.height}" alt="${f.name}"></div>`;
+    <div class="shot">
+      <div class="ph">waiting to render…</div>
+      <img width="${f.width}" height="${f.height}" alt="${f.name}" hidden>
+    </div>`;
   const drop = el.querySelector("[data-drop]");
   if (drop) drop.onclick = () => removeSize(f.name);
   return el;
@@ -42,28 +52,79 @@ function draw() {
   g.innerHTML = "";
   $("asset").innerHTML = `<b>${manifest.name}</b> — ${manifest.width}x${manifest.height},
                           ${manifest.elements.length} elements`;
-  for (const f of manifest.formats) g.appendChild(card(f, manifest.rev));
+  initMaster(manifest);
+
+  for (const grp of GROUPS) {
+    const formats = manifest.formats.filter(grp.match);
+    if (!formats.length) continue;
+    const col = document.createElement("section");
+    col.className = `group group-${grp.key}`;
+    col.innerHTML = `<h3>${grp.title} <span class="lrole">${formats.length}</span></h3>`;
+    for (const f of formats) col.appendChild(card(f));
+    g.appendChild(col);
+  }
+  applyScale();
+  loadPreviews();
+}
+
+/* Previews are requested one at a time. Eight parallel requests for a 24-megapixel
+   master is what made them fail to appear: the browser caps connections, the
+   server renders them serially anyway, and nothing shows until the last finishes.
+   One at a time, each card fills in as soon as it is ready. */
+async function loadPreviews() {
+  const rev = manifest.rev;
+  for (const f of manifest.formats) {
+    await loadPreview(f, rev);
+  }
   loadWarnings();
 }
 
-/* Warnings are fetched separately: they need every plan built, which is the
-   same work the previews trigger, so it must not block the first paint. */
+function loadPreview(f, rev) {
+  return new Promise((done) => {
+    const card = document.querySelector(`.card[data-fmt="${f.name}"]`);
+    if (!card) return done();
+    const img = card.querySelector("img");
+    const ph = card.querySelector(".ph");
+    ph.textContent = "rendering…";
+    ph.classList.add("busy");
+    img.onload = () => { ph.remove(); img.hidden = false; done(); };
+    img.onerror = () => {
+      ph.classList.remove("busy");
+      ph.innerHTML = `could not render ${f.name} — <button>retry</button>`;
+      ph.querySelector("button").onclick = () => loadPreview(f, Date.now());
+      done();
+    };
+    img.src = `/api/render/${f.name}.png?rev=${rev}`;
+  });
+}
+
+/* Warnings need every plan built, which is the work the previews already
+   triggered — so they are fetched last, when it is nearly free. */
 async function loadWarnings() {
   let review;
   try { review = await api("/api/review"); } catch (e) { return; }
   for (const [name, problems] of Object.entries(review)) {
-    const card = document.querySelector(`.card[data-fmt="${name}"] .warnbox`);
-    if (!card || !problems.length) continue;
-    card.hidden = false;
-    card.innerHTML = `<b>The algorithm struggled at this size.</b>
+    const box = document.querySelector(`.card[data-fmt="${name}"] .warnbox`);
+    if (!box || !problems.length) continue;
+    box.hidden = false;
+    box.innerHTML = `<b>The algorithm struggled at this size.</b>
       <ul>${problems.map((p) => `<li>${p}</li>`).join("")}</ul>
       <a href="/edit/${name}?raw=1"><button>Edit manually (raw layout)</button></a>`;
   }
 }
 
+function applyScale() {
+  document.body.classList.toggle("actual-size", actualSize);
+  $("scale").textContent = actualSize ? "fit" : "1:1";
+  $("scale").title = actualSize
+    ? "Scale previews to fit their column" : "Show previews at actual pixel size";
+}
+
+$("scale").onclick = () => { actualSize = !actualSize; applyScale(); };
+
 async function open(path) {
   if (!path) return;
-  $("gallery").innerHTML = '<div class="empty">extracting layers…</div>';
+  $("gallery").innerHTML = '<div class="empty">extracting layers… (a large PSD takes a while — watch the console for progress)</div>';
   try {
     manifest = await api("/api/open", jsonReq("POST", { path }));
     draw();

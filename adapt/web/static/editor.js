@@ -37,7 +37,7 @@ async function boot() {
   }
   $("strategy").textContent = info.strategy;
   buildTabs();
-  showMaster();
+  initMaster(manifest);
 
   // ?raw=1 — arrive straight in the manual fallback layout (from a warned card)
   if (new URLSearchParams(location.search).get("raw")) {
@@ -48,25 +48,6 @@ async function boot() {
     await loadPlan();
   }
   fitZoom();
-}
-
-/* The master asset, rasterised, kept alongside the canvas for reference. Its
-   collapsed state is remembered so it stays out of the way if you don't want it. */
-function showMaster() {
-  $("master").src = "/api/master.png?w=560";
-  $("masterCap").textContent =
-    `${manifest.name} — ${manifest.width}x${manifest.height}, click to open full size`;
-  const apply = () => {
-    const hidden = localStorage.getItem("adapt.master") === "hidden";
-    $("masterBox").hidden = hidden;
-    $("masterToggle").textContent = hidden ? "show" : "hide";
-  };
-  $("masterToggle").onclick = () => {
-    localStorage.setItem("adapt.master",
-      localStorage.getItem("adapt.master") === "hidden" ? "shown" : "hidden");
-    apply();
-  };
-  apply();
 }
 
 function buildTabs() {

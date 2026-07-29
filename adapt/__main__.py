@@ -1,6 +1,7 @@
 import argparse
 import os
 
+from . import psd_source
 from .pipeline import run
 
 
@@ -18,11 +19,23 @@ def main():
     p.add_argument("--use-layout", action="store_true",
                    help="apply layouts hand-edited in the web editor "
                         "(output/layouts/<name>.json) instead of the algorithmic ones")
+    p.add_argument("--quiet", action="store_true",
+                   help="silence the step-by-step progress log (or set ADAPT_QUIET=1)")
+    p.add_argument("--max-dim", type=int, default=None,
+                   help=f"longest side kept for layout work (default "
+                        f"{psd_source.MAX_WORK_DIM}); lower it if a very large "
+                        f"master strains memory")
     p.add_argument("--serve", action="store_true",
                    help="start the web layout editor instead of rendering")
     p.add_argument("--port", type=int, default=8000, help="port for --serve")
     p.add_argument("--host", default="127.0.0.1", help="interface for --serve")
     args = p.parse_args()
+
+    if args.quiet:
+        from . import log
+        log.quiet(True)
+    if args.max_dim:
+        psd_source.MAX_WORK_DIM = args.max_dim
 
     if args.serve:
         from .web import serve

@@ -16,7 +16,7 @@ import os
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-from . import saliency, tiles, store
+from . import log, saliency, tiles, store
 from .formats import FORMATS, strategy_for
 from .layout import LayoutPlan, Placement, element_id
 from .psd_source import load, Source
@@ -194,11 +194,19 @@ def review(plan: LayoutPlan, source: Source) -> list[str]:
 def plan_for_format(source: Source, fmt, importance: np.ndarray) -> LayoutPlan:
     """The algorithmic layout plan for one target format."""
     strategy = effective_strategy(source, fmt)
-    if strategy == "photo":
-        return plan_photo(source, fmt.width, fmt.height, importance)
-    if strategy == "crop":
-        return plan_fit(source, fmt.width, fmt.height)
-    return reflow_mod.plan_for(source, fmt.width, fmt.height)
+    with log.step(f"plan {fmt.name} ({strategy})", 1) as s:
+        if strategy == "photo":
+            plan = plan_photo(source, fmt.width, fmt.height, importance)
+        elif strategy == "crop":
+            plan = plan_fit(source, fmt.width, fmt.height)
+        else:
+            plan = reflow_mod.plan_for(source, fmt.width, fmt.height)
+        problems = review(plan, source)
+        s["note"] = (f"{len(plan.placements)} placements"
+                     + (f", {len(problems)} warning(s)" if problems else ""))
+    for p in problems:
+        log.log(f"warning [{fmt.name}]: {p}", 2)
+    return plan
 
 
 # Supersampling only helps plans that *re-compose* geometry; a single full-frame
@@ -208,8 +216,9 @@ _SS = {"fit": 1, "photo": 1}
 
 def render(plan: LayoutPlan, source: Source, ss: int | None = None) -> Image.Image:
     """Rasterise a plan and apply the pipeline's final sharpening pass."""
-    return _sharpen(render_plan(plan, source,
-                                ss=_SS.get(plan.strategy, 2) if ss is None else ss))
+    ss = _SS.get(plan.strategy, 2) if ss is None else ss
+    with log.step(f"render {plan.name} (ss={ss})", 1):
+        return _sharpen(render_plan(plan, source, ss=ss))
 
 
 def transform(source: Source, fmt, importance: np.ndarray) -> Image.Image:
@@ -253,8 +262,12 @@ def run(input_path: str, out_dir: str = "output", debug: bool = True,
     """Render every format. With ``use_saved``, any layout hand-edited in the web
     editor replaces the algorithmic one for that format."""
     source = load(input_path)
-    importance = saliency.importance_map(_bgr(source.composite), source.elements)
+    with log.step("importance map (saliency + edges + element boxes)") as s:
+        importance = saliency.importance_map(_bgr(source.composite), source.elements)
+        s["note"] = f"{importance.shape[1]}x{importance.shape[0]}"
     saved = store.load(input_path, out_dir) if use_saved else {}
+    if saved:
+        log.log(f"manual layouts on disk: {', '.join(sorted(saved))}", 1)
 
     os.makedirs(out_dir, exist_ok=True)
     formats = list(FORMATS) if sizes is None else list(sizes)

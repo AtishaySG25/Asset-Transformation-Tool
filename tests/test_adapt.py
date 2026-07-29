@@ -8,7 +8,7 @@ import os
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from adapt.formats import FORMATS, Format, strategy_for
 from adapt import smartcrop, saliency, textflow
@@ -323,6 +323,98 @@ def test_custom_sizes_persist_and_reach_the_cli(source, tmp_path):
     assert any(p.endswith("1000x300.png") for p in paths)
     with Image.open(tmp_path / "1000x300.png") as im:
         assert im.size == (1000, 300)
+
+
+class _Node:
+    """Stands in for a psd_tools layer: composites a crop of a fixed image."""
+
+    def __init__(self, img, honour_viewport=True):
+        self.img = img
+        self.honour_viewport = honour_viewport
+
+    def composite(self, viewport=None):
+        if viewport is None or not self.honour_viewport:
+            return self.img
+        return self.img.crop(viewport)
+
+
+def _artwork(w, h):
+    """Smooth gradients plus hard shapes — representative of real artwork.
+
+    (Pure noise would be a pointless subject here: any sub-pixel difference in
+    the resampling grid changes every pixel, so it measures nothing useful.)
+    """
+    y, x = np.mgrid[0:h, 0:w]
+    a = np.stack([(x * 255 // max(1, w - 1)), (y * 255 // max(1, h - 1)),
+                  ((x + y) * 255 // max(1, w + h - 2))], -1).astype(np.uint8)
+    img = Image.fromarray(a, "RGB")
+    d = ImageDraw.Draw(img)
+    for i in range(6):
+        d.rectangle([w * i // 7, h // 4, w * i // 7 + w // 12, 3 * h // 4],
+                    fill=(240, 30, 90))
+    d.ellipse([w // 3, h // 3, 2 * w // 3, 2 * h // 3], outline=(0, 0, 0), width=5)
+    return img
+
+
+def test_banded_compositing_matches_one_pass():
+    # Bands exist to cap memory, so they must not change the picture. The overlap
+    # margin is what makes the seams disappear.
+    from adapt.psd_source import _composite_scaled
+    src = _artwork(600, 400)
+    node = _Node(src)
+    box, k = (0, 0, 600, 400), 0.25
+    one = _composite_scaled(node, box, k, "RGB", band=False)
+    many = _composite_scaled(node, box, k, "RGB", band=True, max_band_px=80_000)
+    assert one.size == many.size == (150, 100)
+
+    # Each band rounds its own target height, so content inside it can land up to
+    # half a pixel out — invisible on the photographic backdrop this is used for,
+    # and zero on the real master, where the boundaries divide evenly. What must
+    # never happen is tiling, which puts these numbers in the hundreds.
+    d = np.abs(np.asarray(one, float) - np.asarray(many, float))
+    assert d.mean() < 1.0, d.mean()
+    assert d.max(2).mean(1).max() < 40, d.max(2).mean(1).max()
+
+
+def test_banding_falls_back_when_the_viewport_is_ignored():
+    # PSDImage.composite() returns the embedded preview and ignores the viewport.
+    # Banding that would tile the whole image down the canvas, so it must detect
+    # the mismatch and composite in one pass instead.
+    from adapt.psd_source import _composite_scaled
+    src = _artwork(600, 400)
+    banded = _composite_scaled(_Node(src, honour_viewport=False), (0, 0, 600, 400),
+                               0.25, "RGB", band=True, max_band_px=20_000)
+    plain = _composite_scaled(_Node(src), (0, 0, 600, 400), 0.25, "RGB", band=False)
+    assert banded.size == (150, 100)
+    assert np.array_equal(np.asarray(banded), np.asarray(plain))
+
+
+def test_working_size_downscale_keeps_boxes_and_pixels_aligned():
+    from adapt.elements import Element
+    from adapt.psd_source import Source, to_working_size
+    canvas = _artwork(4000, 2000)
+    tile = Image.new("RGBA", (400, 200), (10, 20, 30, 255))
+    src = Source(4000, 2000, canvas, [Element(role="logo", name="l", image=tile,
+                                              bbox=(100, 50, 500, 250))], canvas)
+    to_working_size(src, max_dim=1000)
+    assert (src.width, src.height) == (1000, 500)
+    el = src.elements[0]
+    assert el.image.size == (100, 50)
+    # The box must still describe where those pixels are, at the new scale.
+    assert el.bbox == (25, 12, 125, 62)
+    assert (el.width, el.height) == el.image.size
+
+
+def test_importance_map_cap_does_not_change_the_crop(source):
+    # The map is downscaled for speed; the window it selects must not move.
+    bgr = np.array(source.composite.convert("RGB"))[:, :, ::-1].copy()
+    full = saliency.importance_map(bgr, source.elements, max_dim=99999)
+    capped = saliency.importance_map(bgr, source.elements)
+    assert capped.shape == full.shape
+    for fmt in FORMATS:
+        a = smartcrop.crop_box(full, fmt.width, fmt.height)
+        b = smartcrop.crop_box(capped, fmt.width, fmt.height)
+        assert all(abs(x - y) <= 2 for x, y in zip(a, b)), (fmt.name, a, b)
 
 
 def test_detect_objects_flat_fallback():

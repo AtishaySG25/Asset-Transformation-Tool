@@ -54,6 +54,38 @@ function cssColor(rgb) {
   return `rgb(${r},${g},${b})`;
 }
 
+/* The master asset, rasterised, kept beside whatever you are working on. Its
+   collapsed state is remembered so it stays out of the way if you don't want it. */
+function initMaster(manifest) {
+  const img = document.getElementById("master");
+  if (!img) return;
+  img.src = "/api/master.png?w=560";
+  document.getElementById("masterCap").textContent =
+    `${manifest.name} — ${manifest.width}x${manifest.height}, click to open full size`;
+  const box = document.getElementById("masterBox");
+  const btn = document.getElementById("masterToggle");
+  const apply = () => {
+    const hidden = localStorage.getItem("adapt.master") === "hidden";
+    box.hidden = hidden;
+    btn.textContent = hidden ? "show" : "hide";
+  };
+  btn.onclick = () => {
+    localStorage.setItem("adapt.master",
+      localStorage.getItem("adapt.master") === "hidden" ? "shown" : "hidden");
+    apply();
+  };
+  apply();
+}
+
+/* Which family a target belongs to, relative to nothing but its own shape —
+   so custom sizes group themselves without a lookup table. */
+function family(f) {
+  const a = f.width / f.height;
+  if (a >= 2.5) return "banner";
+  if (a <= 0.7) return "skyscraper";
+  return "square";
+}
+
 function label(p) {
   if (p.kind === "element") return p.name || p.role || p.id;
   return { photo_band: "background imagery", color_bar: "colour bar",
