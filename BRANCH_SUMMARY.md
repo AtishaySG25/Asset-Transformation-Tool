@@ -12,7 +12,7 @@ merged to `main`.
 2. `dc0b83b` — Editor: opacity, crop, undo, custom sizes, justify, canvas resize
 3. `6c82956` — Editor: keep the rasterised master alongside the canvas
 4. `f432b4f` — Work at a sane resolution, and say what you are doing
-5. (this one) — Frame the background by hand; make downloads reliable
+5. `bff0c2c` — Frame the background by hand; make downloads reliable
 
 ## 1. Layout plans (the prerequisite refactor)
 
