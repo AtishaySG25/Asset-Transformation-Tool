@@ -19,6 +19,23 @@ const sel = () => plan.placements.find((p) => p.id === selId) || null;
 const byZ = () => [...plan.placements].sort((a, b) => a.z - b.z);
 const isText = (p) => p.kind === "element" && p.params.mode === "reflow";
 const canCrop = (p) => p.kind === "element" && p.params.mode !== "reflow";
+/* A background box is a viewport onto the master's imagery rather than a picture
+   of a thing, so it is framed (fit / zoom / focus) instead of cropped. */
+const isBg = (p) => p.kind === "photo_band" || p.kind === "base_image";
+const fitOf = (p) => p.params.fit || (p.kind === "photo_band" ? "cover" : "stretch");
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+/* How big the imagery is once scaled into a background box, so a drag measured
+   in canvas pixels converts to the right change in focus. Mirrors
+   adapt.background.cover_scale — the box is the viewport, this is the picture. */
+function imageryPx(p) {
+  const sw = manifest.width, sh = manifest.height;
+  const fit = fitOf(p);
+  let s = fit === "contain" ? Math.min(p.w / sw, p.h / sh)
+                            : Math.max(p.w / sw, p.h / sh);
+  s *= p.params.zoom ?? 1;
+  return { w: Math.max(1, sw * s), h: Math.max(1, sh * s) };
+}
 
 /* ------------------------------------------------------------- loading -- */
 async function boot() {
@@ -148,7 +165,7 @@ function syncBox(p) {
     img.hidden = true;
   } else {
     img.hidden = false;
-    if (img.dataset.url !== url) {
+    if (img.dataset.url !== url && !deferTile(p)) {
       img.dataset.url = url;
       img.onload = () => onTileLoaded(p, img);
       img.src = url;
@@ -157,6 +174,26 @@ function syncBox(p) {
   }
   if (p.id === selId && !cropping) addHandles(el);
   else el.querySelectorAll(".handle").forEach((h) => h.remove());
+}
+
+/* Framing a background re-renders its tile server-side, and a pan is a stream of
+   pointer events. Rate-limit those requests during the gesture and take the
+   truthful one when it ends, so dragging stays responsive without firing a
+   render per frame. */
+const BG_FPS_MS = 90;
+let framingUntil = 0, lastBgTile = 0;
+/* A deadline rather than a counter: it lapses on its own shortly after the last
+   gesture event, so a pointerup that never arrives cannot leave previews stuck
+   on a stale tile. */
+const beginFraming = () => { framingUntil = performance.now() + 400; };
+const endFraming = () => { framingUntil = 0; };
+
+function deferTile(p) {
+  const now = performance.now();
+  if (!isBg(p) || now > framingUntil) return false;
+  if (now - lastBgTile < BG_FPS_MS) return true;
+  lastBgTile = now;
+  return false;
 }
 
 /* A re-wrapped text block is only as wide as its longest line, and sits inside
@@ -247,10 +284,15 @@ $("stage").addEventListener("pointerdown", (e) => {
   const p = plan.placements.find((x) => x.id === boxEl.dataset.id);
   if (!p) return;
   if (!handleEl) select(p.id);
+  // Alt-drag inside a background box slides the imagery within the frame rather
+  // than moving the frame — the box stays put, the picture behind it moves.
+  const pan = !handleEl && e.altKey && isBg(p);
+  if (pan && fitOf(p) === "stretch") p.params.fit = "cover";
   drag = {
-    p, dir: handleEl ? handleEl.dataset.dir : null, moved: false,
+    p, dir: handleEl ? handleEl.dataset.dir : null, moved: false, pan,
     sx: e.clientX, sy: e.clientY,
-    o: { x: p.x, y: p.y, w: p.w, h: p.h, line_h: p.params.line_h || 0 },
+    o: { x: p.x, y: p.y, w: p.w, h: p.h, line_h: p.params.line_h || 0,
+         fx: p.params.focus_x ?? 0.5, fy: p.params.focus_y ?? 0.5 },
   };
   e.target.setPointerCapture(e.pointerId);
   e.preventDefault();
@@ -267,7 +309,9 @@ $("stage").addEventListener("pointermove", (e) => {
     redoStack.length = 0;
     syncHistoryButtons();
   }
-  drag.dir ? applyResize(drag, dx, dy, e.shiftKey) : applyMove(drag, dx, dy);
+  if (drag.pan) applyPan(drag, dx, dy);
+  else if (drag.dir) applyResize(drag, dx, dy, e.shiftKey);
+  else applyMove(drag, dx, dy);
   syncBox(drag.p);
   drawProps();
 });
@@ -275,10 +319,12 @@ $("stage").addEventListener("pointermove", (e) => {
 function endDrag() {
   if (!drag) return;
   clearGuides();
-  const { p, moved } = drag;
+  const { p, moved, pan } = drag;
   drag = null;
+  if (pan) endFraming();
   if (!moved) return;
   if (isText(p)) syncBox(p);           // re-fetch the wrap at the new width
+  if (pan) syncBox(p);                 // take the real tile now the drag is over
   markDirty();
 }
 $("stage").addEventListener("pointerup", endDrag);
@@ -291,6 +337,39 @@ function applyMove(d, dx, dy) {
   snap(p);
   clampInside(p);
 }
+
+/* Dragging right should carry the imagery right, which means the viewport moves
+   left over it — hence the sign. The divisor is the scaled picture, so a pan
+   feels the same at any zoom. */
+function applyPan(d, dx, dy) {
+  const p = d.p, px = imageryPx(p);
+  p.params.focus_x = clamp01(d.o.fx - dx / px.w);
+  p.params.focus_y = clamp01(d.o.fy - dy / px.h);
+  beginFraming();
+}
+
+/* Alt+wheel over a selected background zooms the imagery inside its frame. Alt
+   is required so ordinary scrolling still scrolls the stage. */
+let zoomHold = null;
+$("stage").addEventListener("wheel", (e) => {
+  const p = sel();
+  if (!p || !isBg(p) || !e.altKey || cropping) return;
+  e.preventDefault();
+  if (!zoomHold) snapshot();
+  clearTimeout(zoomHold);
+  beginFraming();
+  if (fitOf(p) === "stretch") p.params.fit = "cover";
+  const z = (p.params.zoom ?? 1) * Math.pow(1.0015, -e.deltaY);
+  p.params.zoom = Math.round(Math.max(0.1, Math.min(6, z)) * 1000) / 1000;
+  syncBox(p);
+  drawProps();
+  zoomHold = setTimeout(() => {        // settle: fetch the true tile, then save
+    zoomHold = null;
+    endFraming();
+    syncBox(p);
+    markDirty();
+  }, 220);
+}, { passive: false });
 
 function applyResize(d, dx, dy, freeAspect) {
   const p = d.p, o = d.o;
@@ -580,9 +659,29 @@ function drawProps() {
     html += `<div class="prop"><label>colour</label>
              <input type="color" value="${hex}" data-on="color"></div>`;
   }
-  if (p.kind === "photo_band") {
-    html += num("feather", p.params.feather ?? 0, "feather", 0.01);
-    html += num("focus y", p.params.focus_y ?? 0.5, "focus_y", 0.01);
+  if (isBg(p)) {
+    const fit = fitOf(p);
+    html += `<div class="prop"><label>fit</label>
+        <select data-on="fit">${["cover", "contain", "stretch"].map((a) =>
+          `<option ${fit === a ? "selected" : ""}>${a}</option>`).join("")}
+      </select></div>`;
+    if (fit !== "stretch") {
+      html += `<div class="prop"><label>zoom</label>
+          <input type="range" min="0.1" max="4" step="0.01" value="${p.params.zoom ?? 1}"
+                 data-on="zoom" data-live="1">
+          <span class="lrole">${Math.round((p.params.zoom ?? 1) * 100)}%</span></div>`;
+      html += num("focus x", p.params.focus_x ?? 0.5, "focus_x", 0.01);
+      html += num("focus y", p.params.focus_y ?? 0.5, "focus_y", 0.01);
+    }
+    if (p.kind === "photo_band") {
+      html += num("feather", p.params.feather ?? 0, "feather", 0.01);
+    }
+    html += `<div class="rowbtns">
+        <button data-do="bgWhole" title="Show the whole master inside this box">Whole image</button>
+        <button data-do="bgFill" title="Fill the box, cropping the overflow">Fill box</button>
+      </div>
+      <div class="hint">Alt+drag inside the box to slide the imagery,
+        Alt+wheel to zoom it.</div>`;
   }
   if (!isText(p)) {
     html += `<div class="prop"><label>lock aspect</label>
@@ -621,18 +720,27 @@ function wireProps(host, p) {
       if (k === "lock") p.lock_aspect = inp.checked;
       else if (k === "color") p.params.color = hexToRgb(inp.value);
       else if (k === "opacity") p.opacity = Number(inp.value);
-      else if (["line_h", "align", "feather", "focus_y"].includes(k))
-        p.params[k] = k === "align" ? inp.value : Number(inp.value);
+      else if (["line_h", "align", "feather", "focus_x", "focus_y", "zoom", "fit"]
+                 .includes(k))
+        p.params[k] = (k === "align" || k === "fit") ? inp.value : Number(inp.value);
       else p[k] = Number(inp.value);
       clampInside(p);
       syncBox(p);
       if (!live) { drawProps(); markDirty(); }
-      else if (inp.nextElementSibling)
-        inp.nextElementSibling.textContent = `${Math.round(p.opacity * 100)}%`;
+      else if (inp.nextElementSibling) {
+        const shown = k === "zoom" ? (p.params.zoom ?? 1) : (p.opacity ?? 1);
+        inp.nextElementSibling.textContent = `${Math.round(shown * 100)}%`;
+      }
     };
     if (inp.dataset.live) {
-      inp.oninput = () => commit(true);
-      inp.onchange = () => { markDirty(); };
+      // The zoom slider re-renders imagery server-side, so it is rate-limited
+      // while dragging and takes the true tile once the value settles.
+      const heavy = inp.dataset.on === "zoom";
+      inp.oninput = () => { if (heavy) beginFraming(); commit(true); };
+      inp.onchange = () => {
+        if (heavy) { endFraming(); syncBox(p); }
+        markDirty();
+      };
       inp.onpointerdown = () => snapshot();
     } else {
       inp.onchange = () => commit(false);
@@ -648,6 +756,12 @@ function wireProps(host, p) {
       if (a === "uncrop") return resetCrop(p);
       if (a === "backdrop") return toggleBackdrop(p);
       snapshot();
+      if (a === "bgWhole") {
+        Object.assign(p.params, { fit: "contain", zoom: 1, focus_x: 0.5, focus_y: 0.5 });
+      }
+      if (a === "bgFill") {
+        Object.assign(p.params, { fit: "cover", zoom: 1 });
+      }
       if (a === "centerH") p.x = (plan.width - p.w) / 2;
       if (a === "centerV") p.y = (plan.height - p.h) / 2;
       if (a === "fullW") { p.x = 0; p.w = plan.width; }
@@ -738,13 +852,21 @@ async function save() {
     const d = await api(`/api/plan/${FMT}`, jsonReq("PUT", plan));
     showWarnings(d.warnings);
     toast("layout saved");
-  } catch (e) { toast(e.message, true); }
+    return true;
+  } catch (e) { toast(e.message, true); return false; }
 }
 
-async function renderBlob(download) {
-  const res = await fetch(`/api/render/${FMT}.png${download ? "?download=1" : ""}`,
-                          jsonReq("POST", plan));
-  if (!res.ok) throw new Error(`render failed (${res.status})`);
+async function renderBlob() {
+  let res;
+  try {
+    res = await fetch(`/api/render/${FMT}.png`, jsonReq("POST", plan));
+  } catch (e) {
+    // fetch() reports a dropped or timed-out connection as a bare TypeError, so
+    // say what that actually means rather than surfacing "Failed to fetch".
+    throw new Error("no response from the server — it may still be rendering. "
+                    + "Wait a moment and try again.");
+  }
+  if (!res.ok) throw new Error(await reason(res, "render failed"));
   return res.blob();
 }
 
@@ -773,22 +895,20 @@ $("explode").onclick = async () => {
 $("compare").onclick = async () => {
   const box = $("compareBox");
   try {
-    $("compareImg").src = URL.createObjectURL(await renderBlob(false));
+    $("compareImg").src = URL.createObjectURL(await renderBlob());
     $("compareImg").style.width = `${plan.width * Math.min(zoom, 2)}px`;
     box.hidden = false;
   } catch (e) { toast(e.message, true); }
 };
 
+/* Save first, then let the browser fetch the attachment itself. Building the
+   file in JS meant a slow render surfaced as "Failed to fetch" and lost the
+   download; handing the URL to the browser gives it the usual retry, progress
+   and resume behaviour instead. */
 $("export").onclick = async () => {
-  try {
-    const url = URL.createObjectURL(await renderBlob(true));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${FMT}.png`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast(`exported ${FMT}.png`);
-  } catch (e) { toast(e.message, true); }
+  if (!(await save())) return;
+  location.href = `/api/render/${FMT}.png?download=1&rev=${Date.now()}`;
+  toast(`downloading ${FMT}.png`);
 };
 
 /* ------------------------------------------------------------ keyboard -- */

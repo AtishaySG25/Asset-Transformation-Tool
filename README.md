@@ -90,12 +90,18 @@ plan sent through `to_json`/`from_json` renders **byte-identically**.
 | kind | what it draws |
 |------|----------------|
 | `element` | one extracted element. `params.mode` is `reflow` (text re-wrapped to the box width) or `stretch` (scaled to the box); `params.crop` keeps a sub-rectangle, as fractions of the element's own image |
-| `photo_band` | the background, cover-filled into the box, optionally alpha-feathered |
+| `photo_band` | the background, filled into the box, optionally alpha-feathered |
 | `color_bar` | a solid rectangle (footer bar, disclaimer strip) |
 | `base_image` | a full-frame image from the composite (the `fit` and `photo` strategies) |
 
 Every placement also carries an `opacity`, so an element can be faded to let
 whatever sits behind it — usually the background imagery — show through.
+
+Both background kinds treat their box as a **viewport onto the imagery**, framed
+by three shared params: `fit` (`cover` / `contain` / `stretch`), `zoom` (a
+multiplier on that fit) and `focus_x` / `focus_y` (which point of the image sits
+at the box centre). Their defaults reproduce the original behaviour exactly, so
+plans saved before they existed render unchanged.
 
 ### Wrapping must be reproducible
 
@@ -131,6 +137,14 @@ dependency-free vanilla-JS front end — no CDN, works offline.
   **Background behind** drops the master's own imagery in behind a chosen
   element as its own placement — which can then be moved, faded or feathered
   independently.
+* **Framing the background.** A background box is a viewport, not a fixed crop:
+  **Alt+drag inside it slides the imagery** and **Alt+wheel zooms** it, with
+  `fit` / `zoom` / `focus` also on the properties panel and **Whole image** /
+  **Fill box** shortcuts. This is what makes a wide composition usable in a
+  narrow target — a plain cover crop of a 1200×1200 master into `160x600` can
+  only ever show 27% of its width, and no amount of moving the *box* recovers
+  the rest. Below `zoom` 1 the imagery no longer fills the box and the gap is
+  left transparent, so the base colour (or anything behind) shows through.
 * **Crop.** Any non-text element can be cropped interactively: the element is
   shown dimmed with a bright rectangle over the part being kept. The crop is
   stored as *fractions* of the element's image, so it keeps its meaning at any
@@ -143,8 +157,11 @@ dependency-free vanilla-JS front end — no CDN, works offline.
   collapses if you want the room back.
 * **Per format.** Moving something in `970x90` has no effect on `160x600`.
 * **Reset to algorithm** per format, **Show render** to see the true server
-  render beside the canvas, **Export PNG** (single) and **Export all** (writes
-  `output/`).
+  render beside the canvas, **Export PNG** (saves the current format), **Export
+  all** (writes `output/`) and **Download all (.zip)** (every size in one
+  archive). Downloads are plain attachments handed to the browser rather than
+  blobs assembled in JS — a slow render then shows up as a slow download instead
+  of a failed `fetch`.
 * **Explode elements** — the near-square formats default to scaling the flat
   composite (which preserves PSD layer effects); this button breaks that into one
   box per element when you actually want to re-arrange them.

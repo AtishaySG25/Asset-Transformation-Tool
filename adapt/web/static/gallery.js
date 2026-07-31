@@ -85,17 +85,42 @@ function loadPreview(f, rev) {
     if (!card) return done();
     const img = card.querySelector("img");
     const ph = card.querySelector(".ph");
+    const url = `/api/render/${f.name}.png?rev=${rev}`;
+    let attempt = 0;
     ph.textContent = "rendering…";
     ph.classList.add("busy");
     img.onload = () => { ph.remove(); img.hidden = false; done(); };
-    img.onerror = () => {
+    img.onerror = async () => {
+      // An <img> only reports *that* it failed, so ask the server why. Most
+      // often the render simply outran the browser's patience, in which case the
+      // follow-up request succeeds and we can just use it — but only once, so a
+      // server that alternates between working and not cannot loop us forever.
+      ph.textContent = `could not render ${f.name} — checking why…`;
+      const why = await explain(url);
+      if (why === null && attempt++ === 0) { img.src = `${url}&retry=1`; return; }
       ph.classList.remove("busy");
-      ph.innerHTML = `could not render ${f.name} — <button>retry</button>`;
+      ph.innerHTML = `could not render ${f.name}
+        <div class="hint">${why ?? "the request keeps timing out before the "
+          + "image arrives — the server is slow to respond right now."}</div>
+        <button>retry</button>`;
       ph.querySelector("button").onclick = () => loadPreview(f, Date.now());
       done();
     };
-    img.src = `/api/render/${f.name}.png?rev=${rev}`;
+    img.src = url;
   });
+}
+
+/* null means "it actually works now" — the first attempt timed out rather than
+   failed, so the caller should just load it again. */
+async function explain(url) {
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (res.ok) return null;
+    return await reason(res, "the server could not build this layout");
+  } catch (e) {
+    return "the server did not respond. It may be paged out or busy with "
+         + "another render — press retry, or restart <code>run.py --serve</code>.";
+  }
 }
 
 /* Warnings need every plan built, which is the work the previews already
@@ -176,6 +201,14 @@ $("export").onclick = async () => {
     const r = await api("/api/export", { method: "POST" });
     toast(`wrote ${r.written.length} PNGs to output/`);
   } catch (e) { toast(e.message, true); }
+};
+
+/* Handed straight to the browser rather than assembled in JS: a big archive is
+   exactly the case where building a blob in the page tends to fail. */
+$("zip").onclick = () => {
+  if (!manifest) return toast("open an asset first", true);
+  location.href = `/api/download.zip?rev=${Date.now()}`;
+  toast("preparing the archive — the download starts when every size is rendered");
 };
 
 (async () => {

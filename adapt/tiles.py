@@ -131,20 +131,54 @@ def with_opacity(tile: Image.Image, opacity: float) -> Image.Image:
     return Image.fromarray(a)
 
 
-def photo_band_tile(bg: Image.Image, w: int, h: int, feather: float = 0.22,
-                    focus_x: float = 0.5, focus_y: float | None = None) -> Image.Image:
-    """The background imagery as a band, optionally with soft left/right edges so
-    it blends into the base instead of reading as a pasted-in tile."""
-    w, h = max(1, int(w)), max(1, int(h))
-    if focus_y is None:
-        focus_y = saliency_row(bg)
-    panel = fill_background(bg, w, h, focus=(focus_x, focus_y)).convert("RGBA")
+FITS = ("cover", "contain", "stretch")
+
+
+def _feathered(panel: Image.Image, feather: float) -> Image.Image:
+    """Fade the left and right edges so a band blends into the base instead of
+    reading as a pasted-in tile."""
     if feather <= 0:
         return panel
     arr = np.array(panel)
-    fw = max(1, int(feather * w))
+    fw = max(1, int(feather * panel.width))
     ramp = np.ones(arr.shape[1], np.float32)
     ramp[:fw] = np.linspace(0.0, 1.0, fw)
     ramp[-fw:] = np.linspace(1.0, 0.0, fw)
     arr[:, :, 3] = (arr[:, :, 3].astype(np.float32) * ramp[None, :]).astype(np.uint8)
     return Image.fromarray(arr)
+
+
+def background_tile(img: Image.Image, w: int, h: int, fit: str = "cover",
+                    zoom: float = 1.0, focus=(0.5, 0.5), feather: float = 0.0,
+                    pad=None) -> Image.Image:
+    """Source imagery placed inside an exact ``w`` x ``h`` box.
+
+    ``fit`` picks the base scale — ``cover`` fills the box and crops the
+    overflow, ``contain`` scales the whole image to be visible, ``stretch``
+    ignores aspect and fills the box exactly (the historical ``base_image``
+    behaviour). ``zoom`` then multiplies that scale and ``focus`` chooses what
+    sits at the centre; together they are what let a wide composition be
+    positioned by hand inside a narrow target.
+    """
+    w, h = max(1, int(w)), max(1, int(h))
+    if fit == "stretch":
+        return _feathered(img.resize((w, h), Image.LANCZOS).convert("RGBA"), feather)
+    z = float(zoom)
+    if fit == "contain":
+        sw, sh = img.size
+        # cover scale x this == contain scale, so `zoom` keeps meaning "1 == the
+        # fit you asked for" whichever fit that is.
+        z *= min(w / sw, h / sh) / max(w / sw, h / sh)
+    panel = fill_background(img, w, h, focus=tuple(focus), zoom=z, pad=pad)
+    return _feathered(panel.convert("RGBA"), feather)
+
+
+def photo_band_tile(bg: Image.Image, w: int, h: int, feather: float = 0.22,
+                    focus_x: float = 0.5, focus_y: float | None = None,
+                    fit: str = "cover", zoom: float = 1.0) -> Image.Image:
+    """The background imagery as a band. ``focus_y`` defaults to wherever the
+    imagery actually lives, so an unadjusted band is already well framed."""
+    if focus_y is None:
+        focus_y = saliency_row(bg)
+    return background_tile(bg, w, h, fit=fit, zoom=zoom,
+                           focus=(focus_x, focus_y), feather=feather)

@@ -237,6 +237,38 @@ def test_web_api_round_trip(source, tmp_path):
         assert im.size == (300, 250)
 
 
+def test_downloads_are_plain_attachments(source, tmp_path):
+    # The browser has to be able to fetch these itself — no JS assembling a blob
+    # — so each must arrive as a normal attachment with a filename.
+    import zipfile
+    from adapt.web import create_app
+    c = create_app("input", str(tmp_path)).test_client()
+    assert c.post("/api/open", json={"path": INPUT}).status_code == 200
+
+    r = c.get("/api/render/970x90.png?download=1")
+    assert r.status_code == 200
+    assert "attachment" in r.headers["Content-Disposition"]
+    assert "970x90.png" in r.headers["Content-Disposition"]
+    # ...and it is the same image the gallery previews, not a second render.
+    assert r.data == c.get("/api/render/970x90.png").data
+
+    z = c.get("/api/download.zip")
+    assert z.status_code == 200
+    assert "attachment" in z.headers["Content-Disposition"]
+    with zipfile.ZipFile(io.BytesIO(z.data)) as zf:
+        assert sorted(zf.namelist()) == sorted(f"{f.name}.png" for f in FORMATS)
+        with Image.open(io.BytesIO(zf.read("160x600.png"))) as im:
+            assert im.size == (160, 600)
+
+    # A hand-edited layout is what gets downloaded, not the algorithmic one.
+    plan = c.get("/api/plan/160x600").get_json()["plan"]
+    band = next(p for p in plan["placements"] if p["kind"] == "photo_band")
+    band["params"].update(zoom=0.35, focus_x=0.15)
+    assert c.put("/api/plan/160x600", json=plan).status_code == 200
+    with zipfile.ZipFile(io.BytesIO(c.get("/api/download.zip").data)) as zf:
+        assert zf.read("160x600.png") == c.get("/api/render/160x600.png").data
+
+
 def test_justify_fills_the_column():
     # Justified lines span the full column; the last line stays flush left.
     from PIL import Image as Im, ImageDraw
@@ -415,6 +447,109 @@ def test_importance_map_cap_does_not_change_the_crop(source):
         a = smartcrop.crop_box(full, fmt.width, fmt.height)
         b = smartcrop.crop_box(capped, fmt.width, fmt.height)
         assert all(abs(x - y) <= 2 for x, y in zip(a, b)), (fmt.name, a, b)
+
+
+# --------------------------------------------------- background framing --
+def _stripes(w, h):
+    """An image whose content differs everywhere, so any reframing is visible."""
+    a = np.zeros((h, w, 3), np.uint8)
+    a[:, :, 0] = np.linspace(0, 255, w, dtype=np.uint8)[None, :]
+    a[:, :, 1] = np.linspace(0, 255, h, dtype=np.uint8)[:, None]
+    a[::7, :, 2] = 255
+    return Image.fromarray(a)
+
+
+def test_zoom_one_is_the_old_cover_crop():
+    # The whole feature has to be inert at its default, or every saved layout
+    # and every algorithmic render would shift.
+    from adapt.background import fill_background
+    src = _stripes(1200, 1200)
+    for tw, th in [(160, 600), (970, 90), (300, 250), (200, 200)]:
+        for focus in [(0.5, 0.5), (0.2, 0.8), (0.0, 1.0)]:
+            base = fill_background(src, tw, th, focus=focus)
+            same = fill_background(src, tw, th, focus=focus, zoom=1.0)
+            assert base.size == same.size == (tw, th)
+            assert base.mode == "RGB"                 # covers, so no padding
+            assert np.array_equal(np.array(base), np.array(same))
+
+
+def test_zooming_out_shows_more_than_a_cover_crop_can():
+    # The reported problem: at 160x600 a cover crop of a square master can only
+    # ever show 160/600 of its width. Pulling back must reveal more.
+    from adapt.background import fill_background
+    src = _stripes(1200, 1200)
+    covered = fill_background(src, 160, 600, focus=(0.5, 0.5))
+    # Red increases left->right across the source, so the span of red values in
+    # the result measures how much of the source's width is visible.
+    span = lambda im: int(np.ptp(np.array(im.convert("RGB"))[:, :, 0].astype(int)))
+    wide = fill_background(src, 160, 600, focus=(0.5, 0.5), zoom=0.25)
+    assert wide.size == (160, 600)
+    assert span(wide) > span(covered) * 2, (span(wide), span(covered))
+    assert wide.mode == "RGBA"                        # cannot cover: padded
+    assert np.array(wide)[:, :, 3].min() == 0         # and the pad is transparent
+
+
+def test_focus_pans_without_moving_or_resizing_the_box():
+    from adapt.background import fill_background
+    src = _stripes(1200, 1200)
+    left = fill_background(src, 160, 600, focus=(0.15, 0.5))
+    right = fill_background(src, 160, 600, focus=(0.85, 0.5))
+    assert left.size == right.size == (160, 600)      # the frame never moves...
+    assert not np.array_equal(np.array(left), np.array(right))   # ...content does
+    # Red rises left->right in the source, so panning right must raise it here.
+    assert np.array(right)[:, :, 0].mean() > np.array(left)[:, :, 0].mean() + 20
+
+
+def test_focus_cannot_open_a_gap_while_the_imagery_covers():
+    # Panning to the extremes at zoom>=1 must still fill the box completely —
+    # the no-clipping/no-padding guarantee the renderer has always made.
+    from adapt.background import fill_background
+    src = _stripes(1200, 1200)
+    for f in [(0.0, 0.0), (1.0, 1.0), (-5.0, 5.0)]:
+        out = fill_background(src, 300, 250, focus=f, zoom=1.4)
+        assert out.mode == "RGB" and out.size == (300, 250)
+
+
+def test_contain_fits_the_whole_image_in_the_box():
+    from adapt import tiles
+    src = _stripes(1200, 600)
+    out = tiles.background_tile(src, 200, 200, fit="contain")
+    assert out.size == (200, 200)
+    a = np.array(out)
+    # 1200x600 into a square: full width, half the height, rest transparent.
+    opaque_rows = np.where(a[:, :, 3].max(axis=1) > 0)[0]
+    assert len(opaque_rows) == pytest.approx(100, abs=2)
+    assert a[:, :, 3].min() == 0
+
+
+def test_framed_background_renders_through_the_plan(source):
+    # The params have to survive a plan round-trip and reach the renderer, since
+    # that is the path both the editor and --use-layout take.
+    from adapt.layout import LayoutPlan, Placement
+    from adapt.pipeline import render
+    plan = LayoutPlan(160, 600, strategy="reflow-tall", base_color=(255, 255, 255))
+    plan.add(Placement(id="photo-band", kind="photo_band", x=0, y=0, w=160, h=600,
+                       lock_aspect=False,
+                       params={"feather": 0.0, "focus_x": 0.5, "focus_y": 0.5}))
+    plain = np.array(render(plan, source))
+
+    plan.placements[0].params.update(zoom=0.4, focus_x=0.2)
+    reframed = LayoutPlan.from_json(plan.to_json())
+    assert reframed.placements[0].params["zoom"] == 0.4
+    out = render(reframed, source)
+    assert out.size == (160, 600)                      # exact size still holds
+    assert not np.array_equal(plain, np.array(out))    # and it really reframed
+
+
+def test_base_image_defaults_to_the_old_stretch(source):
+    # plan_fit's near-square output must not change now base_image can be framed.
+    from adapt.pipeline import plan_fit, render
+    plan = plan_fit(source, 300, 250)
+    before = np.array(render(plan, source))
+    plan.placements[0].params["fit"] = "stretch"        # the implicit default
+    assert np.array_equal(before, np.array(render(plan, source)))
+    plan.placements[0].params.update(fit="cover", zoom=1.0)
+    assert not np.array_equal(before, np.array(render(plan, source)))
 
 
 def test_detect_objects_flat_fallback():

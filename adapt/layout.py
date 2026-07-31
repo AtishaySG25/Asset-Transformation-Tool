@@ -12,11 +12,19 @@ Placement kinds
 ``element``     one extracted :class:`~adapt.elements.Element`. ``params["mode"]``
                 is ``"reflow"`` (text re-wrapped to the box width, see
                 :func:`adapt.tiles.text_tile`) or ``"stretch"`` (scaled to the box).
-``photo_band``  the source background, cover-filled into the box, optionally
-                feathered at the left/right edges.
+``photo_band``  the source background, filled into the box, optionally feathered
+                at the left/right edges.
 ``color_bar``   a solid rectangle (footer bar, disclaimer strip, ...).
 ``base_image``  a full-frame image derived from the composite — used by the crop
                 and photo strategies.
+
+Both background kinds treat their box as a *viewport* onto the imagery, framed by
+three shared params (see :func:`adapt.tiles.background_tile`): ``fit``
+(``cover`` / ``contain`` / ``stretch``), ``zoom`` (a multiplier on that fit) and
+``focus_x`` / ``focus_y`` (which point of the image sits at the box centre).
+Their defaults reproduce the original behaviour exactly — ``cover`` for a band,
+``stretch`` for a base image, both at ``zoom=1`` — so a plan saved before these
+existed renders identically.
 """
 from __future__ import annotations
 

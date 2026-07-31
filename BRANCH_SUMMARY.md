@@ -6,12 +6,13 @@ web tool for reviewing and hand-correcting those layouts, plus a resolution/
 memory rework needed to make it usable on large PSDs. Nothing here has been
 merged to `main`.
 
-4 commits, in order:
+5 commits, in order:
 
 1. `db53df5` — Add a manual layout editor, built on layout plans
 2. `dc0b83b` — Editor: opacity, crop, undo, custom sizes, justify, canvas resize
 3. `6c82956` — Editor: keep the rasterised master alongside the canvas
 4. `f432b4f` — Work at a sane resolution, and say what you are doing
+5. (this one) — Frame the background by hand; make downloads reliable
 
 ## 1. Layout plans (the prerequisite refactor)
 
@@ -145,6 +146,57 @@ now called out in the log.
   server logs every API call the same way, including cache hits and
   failures. Silence with `--quiet` or `ADAPT_QUIET=1`.
 
+## 6. Framing the background by hand
+
+The background was placed by a *forced* cover crop: scale until it fills the box,
+centre on a focus point, clamp that focus so no gap can open. In a 160x600
+skyscraper that means a 1200x1200 master can only ever show 27% of its width —
+one bridge pillar out of three — and because the constraint is the scale rather
+than the position, moving or resizing the *box* cannot recover the rest.
+
+`fill_background` now treats the box as a **viewport**: `zoom` multiplies the
+cover scale and `focus_x` / `focus_y` place a point of the image at the box
+centre, clamped to `[min(0, n-t), max(0, n-t)]` — which is the old no-gap rule
+when the imagery covers, and free positioning when it does not. `tiles.
+background_tile` adds `fit` (`cover` / `contain` / `stretch`) on top, and both
+`photo_band` *and* `base_image` now go through it, so the near-square formats are
+adjustable too.
+
+Defaults reproduce the old behaviour exactly (`cover`/`stretch` at `zoom=1`), and
+that is asserted rather than assumed: all six outputs are byte-identical before
+and after, for both the algorithmic plans and the saved hand-edited ones.
+
+In the editor a background box is framed by direct manipulation — **Alt+drag
+slides the imagery, Alt+wheel zooms it** — with `fit` / `zoom` / `focus` on the
+properties panel and **Whole image** / **Fill box** shortcuts. Tile re-renders
+during a gesture are rate-limited to ~11/s behind a self-expiring deadline (not a
+counter, so a lost pointerup cannot strand the preview on a stale tile), with the
+true tile fetched when the gesture settles.
+
+## 7. Downloads that do not fail
+
+Reported as "Failed to fetch" when downloading, and previews that never arrive.
+Both were the same shape of problem: the page built the file itself with
+`fetch` + `Blob`, so a render that outran the browser's patience lost the whole
+download and reported a bare `TypeError`.
+
+- **Export PNG** now saves the plan, then hands `GET /api/render/<fmt>.png?download=1`
+  to the browser as a normal attachment — native progress, retry and resume.
+- **Download all (.zip)** (`GET /api/download.zip`) is new: every size in one
+  archive, again as a plain attachment. Previously the only "export all" wrote
+  to `output/` on the server, which is no help for getting files off the machine.
+- Gallery previews now say *why* they failed. An `<img>` reports only that it
+  failed, so on error the page asks the server directly: a 500 shows its message,
+  a dropped connection says so, and a first attempt that merely timed out is
+  retried once and used.
+
+The root cause on this machine was **memory pressure, not a rendering bug**: with
+7.5 GB of RAM and ~750 MB free, the long-running server's 830 MB working set had
+been paged almost entirely to disk (resident 6 MB), so the first request after an
+idle period had to fault it all back before it could answer. Every format renders
+correctly — verified through the CLI, the Flask test client, real HTTP, and a
+real browser. `--max-dim` remains the lever if a master is too big for comfort.
+
 ## New CLI flags
 
 ```
@@ -166,7 +218,7 @@ adapt/web/templates/{editor.html,gallery.html}
 
 ## Testing
 
-24 pytest cases (up from 8 on `main`), covering: everything on `main`
+32 pytest cases (up from 8 on `main`), covering: everything on `main`
 (routing, role extraction, importance map, exact dimensions, text reflow,
 flat-image fallback) plus — plan JSON round-trips render byte-identically;
 re-wrapped text reproduces its own recorded wrap exactly; manual edits
@@ -178,7 +230,12 @@ what's behind; custom sizes lay out and reach the CLI; `review()` is silent
 on all six standard sizes; banded compositing matches single-pass output;
 the viewport-ignored fallback is exercised directly; working-size downscale
 keeps element boxes and pixels aligned; the importance-map cap doesn't move
-the chosen crop window.
+the chosen crop window; `zoom=1` is bit-for-bit the old cover crop at every
+size and focus; zooming out really does reveal more than a cover crop can;
+focus pans content without moving the frame; focus cannot open a gap while the
+imagery covers; `contain` fits the whole image; framing survives a plan
+round-trip to the renderer; `base_image` still defaults to the old stretch;
+and both downloads arrive as attachments carrying the *edited* layout.
 
 Also manually verified end-to-end in a real Chromium browser (Playwright,
 throwaway venv, not the project's own): drag, handle-resize with genuine
@@ -202,8 +259,14 @@ both `Axis.psd` (1200x1200) and the 24-megapixel Women's Day PSD.
   extended there.
 - Export is PNG only — no JPEG option currently exists in the tool, despite
   earlier conversation referring to JPG/PNG export.
+- Below `zoom` 1 a background no longer fills its box; the shortfall is left
+  transparent so the base colour shows through, rather than being edge-extended
+  or mirrored.
+- The machine this was tested on has 7.5 GB of RAM, and a long-lived server plus
+  a large master will page out. That is what made previews and downloads fail;
+  the tool now reports it clearly instead of failing silently, but it cannot
+  create memory. `--max-dim` lowers the working resolution if needed.
 
 ## Branch state
 
-Working tree clean, 4 commits ahead of `main`, not merged. All work here
-is local-only (no pushes to a remote were made as part of this branch).
+Working tree clean, 5 commits ahead of `main`, not merged.

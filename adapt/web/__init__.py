@@ -24,9 +24,10 @@ Routes
 ``POST /api/plan/<fmt>/reset``   drop the manual layout, back to the algorithm
 ``POST /api/plan/<fmt>/explode`` break a flat 'fit' plan into per-element boxes
 ``POST /api/plan/<fmt>/raw``     every layer in reading order (manual fallback)
-``GET  /api/render/<fmt>.png``   render the stored plan
+``GET  /api/render/<fmt>.png``   render the stored plan (``?download=1`` to save)
 ``POST /api/render/<fmt>.png``   render a posted plan (live preview / export)
 ``POST /api/export``             write PNGs for every format to the output dir
+``GET  /api/download.zip``       every format as one downloadable archive
 """
 from __future__ import annotations
 
@@ -36,6 +37,7 @@ import json
 import os
 import threading
 import time
+import zipfile
 
 import numpy as np
 from PIL import Image
@@ -411,8 +413,13 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
 
     @app.get("/api/render/<fmt>.png")
     def api_render(fmt):
+        """The stored plan, rendered. ``?download=1`` makes it an attachment, so
+        the browser saves it with its own download machinery — no fetch, no blob,
+        and nothing to fail halfway through on a slow render."""
         s = session()
-        return png_bytes(_render_bytes(fmt, s.plan(fmt)))
+        return png_bytes(_render_bytes(fmt, s.plan(fmt)),
+                         download_name=f"{fmt}.png"
+                         if request.args.get("download") else None)
 
     @app.post("/api/render/<fmt>.png")
     def api_render_posted(fmt):
@@ -435,6 +442,21 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
                 written.append(path.replace("\\", "/"))
         return jsonify({"written": written,
                         "layouts": store.path_for(s.path, out).replace("\\", "/")})
+
+    @app.get("/api/download.zip")
+    def api_download_zip():
+        """Every format in one archive, as a plain attachment — the reliable way
+        to get the edited renders off the machine in one go."""
+        s = session()
+        buf = io.BytesIO()
+        with log.step(f"zip {len(s.all_formats())} formats"):
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                for f in s.all_formats():
+                    z.writestr(f"{f.name}.png", _render_bytes(f.name, s.plan(f.name)))
+        buf.seek(0)
+        stem = os.path.splitext(os.path.basename(s.path))[0]
+        return send_file(buf, mimetype="application/zip", as_attachment=True,
+                         download_name=f"{stem}-adapt.zip")
 
     return app
 

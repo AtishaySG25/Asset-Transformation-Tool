@@ -18,6 +18,16 @@ const jsonReq = (method, body) => ({
   body: JSON.stringify(body),
 });
 
+/* Why a response failed, in words. The server sends {"message": ...} for its own
+   errors; anything else (a proxy page, a truncated body) falls back to the code. */
+async function reason(res, prefix = "request failed") {
+  try {
+    const m = (await res.json()).message;
+    if (m) return `${prefix} (${res.status}) — ${m}`;
+  } catch (e) { /* not JSON */ }
+  return `${prefix} (${res.status} ${res.statusText})`;
+}
+
 let toastTimer = null;
 function toast(msg, isError = false) {
   const el = document.getElementById("toast");
@@ -88,6 +98,7 @@ function family(f) {
 
 function label(p) {
   if (p.kind === "element") return p.name || p.role || p.id;
-  return { photo_band: "background imagery", color_bar: "colour bar",
-           base_image: "flattened composite" }[p.kind] || p.kind;
+  if (p.kind === "base_image")
+    return p.params?.src === "background" ? "background image" : "flattened composite";
+  return { photo_band: "background imagery", color_bar: "colour bar" }[p.kind] || p.kind;
 }

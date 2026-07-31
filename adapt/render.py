@@ -36,7 +36,9 @@ def placement_tile(p: Placement, source, scale: float = 1.0) -> Image.Image | No
             source.background, round(p.w * scale), round(p.h * scale),
             feather=float(p.params.get("feather", 0.0)),
             focus_x=float(p.params.get("focus_x", 0.5)),
-            focus_y=p.params.get("focus_y"))
+            focus_y=p.params.get("focus_y"),
+            fit=p.params.get("fit", "cover"),
+            zoom=float(p.params.get("zoom", 1.0)))
 
     if p.kind == "color_bar":
         color = tuple(p.params.get("color", (0, 0, 0)))
@@ -48,8 +50,16 @@ def placement_tile(p: Placement, source, scale: float = 1.0) -> Image.Image | No
         crop = p.params.get("crop_px")          # source pixels, not fractions
         if crop:
             src = src.crop(tuple(int(v) for v in crop))
-        return src.resize((max(1, round(p.w * scale)),
-                           max(1, round(p.h * scale))), Image.LANCZOS)
+        w, h = max(1, round(p.w * scale)), max(1, round(p.h * scale))
+        # A full-frame base image is stretched to the box unless the user has
+        # reframed it by hand, which is the historical (and byte-identical) path.
+        fit = p.params.get("fit", "stretch")
+        if fit == "stretch":
+            return src.resize((w, h), Image.LANCZOS)
+        return tiles.background_tile(
+            src, w, h, fit=fit, zoom=float(p.params.get("zoom", 1.0)),
+            focus=(float(p.params.get("focus_x", 0.5)),
+                   float(p.params.get("focus_y", 0.5))))
 
     return None
 
