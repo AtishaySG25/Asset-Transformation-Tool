@@ -1,10 +1,17 @@
 """Content-preserving reflow for extreme aspect ratios.
 
-Instead of cropping (which loses content) or dropping elements, we *re-flow* the
-whole composition: every discrete element is kept, text is re-wrapped to the new
-width (see :mod:`adapt.textflow`), and the elements are re-stacked following the
-master's own top-to-bottom reading order — so the layout logic is driven by the
-source geometry, not by hardcoded element names, and generalises to other PSDs.
+Instead of cropping (which loses content), we *re-flow* the whole composition:
+text is re-wrapped to the new width (see :mod:`adapt.textflow`) and the elements
+are re-stacked following the master's own top-to-bottom reading order — so the
+layout logic is driven by the source geometry, not by hardcoded element names,
+and generalises to other PSDs.
+
+Keeping *every* element is the default, and it is the right answer for a master
+with a handful of them. It stops being right at fifteen: laid out as equals in a
+970x90 banner they all shrink past legibility and the message is lost among the
+decoration. So the caller may pass a ``keep`` budget naming the elements that
+made the cut — see :func:`adapt.pipeline.plan_reflow`, which decides that by
+role priority and re-attaches the rest as hidden placements.
 
 * portrait targets  -> vertical stack (elements top->bottom)
 * landscape targets -> horizontal flow (reading order mapped left->right)
@@ -24,19 +31,27 @@ from .render import render_plan
 from .tiles import is_reflow_text          # re-exported: used by pipeline/tests
 
 
-def _indexed(source):
-    return list(enumerate(source.elements))
+def _indexed(source, keep: set[int] | None = None):
+    """Elements to lay out, with their source indices.
+
+    ``keep`` is the element budget (see :func:`adapt.pipeline.plan_reflow`): a
+    master with fifteen decorative layers cannot put all of them in a 970x90
+    banner at a legible size, so the caller decides which ones make the cut and
+    the rest are re-attached as hidden placements.
+    """
+    return [(i, e) for i, e in enumerate(source.elements)
+            if keep is None or i in keep]
 
 
 # -------------------------------------------------------------- portrait --
-def _tall_specs(source, cw: int, th: int, k: float):
+def _tall_specs(source, cw: int, th: int, k: float, keep=None):
     """Placement specs (with measured tiles) for a vertical stack.
 
     ``k`` is a global size multiplier used to grow the elements so the stack
     fills the canvas instead of leaving gaps.
     """
     out = []
-    for idx, el in _indexed(source):
+    for idx, el in _indexed(source, keep):
         if is_reflow_text(el):
             line_h = max(9, round(th * 0.045 * (el.priority / 70) * k))
             tile = tiles.text_tile(el, cw, line_h, align="center")
@@ -49,7 +64,7 @@ def _tall_specs(source, cw: int, th: int, k: float):
     return out
 
 
-def plan_tall(source, tw: int, th: int) -> LayoutPlan:
+def plan_tall(source, tw: int, th: int, keep=None) -> LayoutPlan:
     """Vertical stack: every element in reading order, plus a full-bleed band of
     the background imagery at the document position where the imagery lives."""
     margin = max(3, round(0.03 * tw))
@@ -68,7 +83,7 @@ def plan_tall(source, tw: int, th: int) -> LayoutPlan:
         "params": {"feather": 0.0, "focus_x": 0.5, "focus_y": 0.5}}
 
     def assemble(k):
-        items = _tall_specs(source, cw, th, k) + [band]
+        items = _tall_specs(source, cw, th, k, keep) + [band]
         items.sort(key=lambda d: d["key"])
         return items
 
@@ -76,8 +91,9 @@ def plan_tall(source, tw: int, th: int) -> LayoutPlan:
         return sum(d["tile"].height for d in items) + gap * (len(items) - 1)
 
     # Grow the elements so the stack fills the height, then back off until it fits.
-    n = max(1, len(source.elements))
-    tot0 = sum(d["tile"].height for d in _tall_specs(source, cw, th, 1.0)) + gap * n
+    n = max(1, len(_indexed(source, keep)))
+    tot0 = sum(d["tile"].height
+               for d in _tall_specs(source, cw, th, 1.0, keep)) + gap * n
     k = min(1.7, max(0.6, (avail * 0.97 - band_h) / max(1, tot0 - band_h)))
     items = assemble(k)
     for _ in range(6):
@@ -110,22 +126,22 @@ def plan_tall(source, tw: int, th: int) -> LayoutPlan:
 
 
 # ------------------------------------------------------------- landscape --
-def _footer_text(source):
+def _footer_text(source, keep=None):
     """A very wide, low-priority text line sitting at the bottom of the master —
     e.g. the market-risk disclaimer. Detected by shape+position, not by name, so
     it generalises. Laid out as a full-width bottom strip."""
-    for idx, el in _indexed(source):
+    for idx, el in _indexed(source, keep):
         if (is_reflow_text(el) and el.cy > 0.80 * source.height
                 and el.width / max(1, el.height) > 8):
             return idx, el
     return None, None
 
 
-def _footer_bar(source):
+def _footer_bar(source, keep=None):
     """A wide logo lock-up sitting at the bottom of the master — rendered as a
     full-width footer band (matches the skyscraper), not a small corner element.
     Detected by shape+position, so it generalises."""
-    for idx, el in _indexed(source):
+    for idx, el in _indexed(source, keep):
         if (el.role == "logo" and el.width / max(1, el.height) > 4
                 and el.cy > 0.70 * source.height):
             return idx, el
@@ -194,7 +210,7 @@ def _pack_columns(indexed):
     return cols
 
 
-def plan_wide(source, tw: int, th: int) -> LayoutPlan:
+def plan_wide(source, tw: int, th: int, keep=None) -> LayoutPlan:
     """2-D column packing for leaderboards/banners: a light base, the background
     imagery as a soft-edged centre band, reading-order columns across the width,
     and a full-width footer bar + disclaimer strip along the bottom."""
@@ -215,14 +231,14 @@ def plan_wide(source, tw: int, th: int) -> LayoutPlan:
 
     # 2. Reserve the bottom for the footer: a full-width logo bar plus the
     #    full-width disclaimer strip beneath it.
-    f_idx, footer = _footer_text(source)
+    f_idx, footer = _footer_text(source, keep)
     strip_h = max(10, round(0.18 * th)) if footer is not None else 0
-    b_idx, bar_el = _footer_bar(source)
+    b_idx, bar_el = _footer_bar(source, keep)
     bar_h = max(10, round(0.16 * th)) if bar_el is not None else 0
     region_h = th - strip_h - bar_h
     ch = round(0.86 * region_h)                  # column height (breathing room)
 
-    body = [(i, e) for i, e in _indexed(source) if i not in (f_idx, b_idx)]
+    body = [(i, e) for i, e in _indexed(source, keep) if i not in (f_idx, b_idx)]
 
     # 3. Render each column. The headline is rendered dominant (big title block).
     def col_specs(col):
@@ -300,9 +316,9 @@ def plan_wide(source, tw: int, th: int) -> LayoutPlan:
 
 
 # ----------------------------------------------------------------- entry --
-def plan_for(source, tw: int, th: int) -> LayoutPlan:
+def plan_for(source, tw: int, th: int, keep=None) -> LayoutPlan:
     """The algorithmic plan for an extreme-ratio target."""
-    return (plan_wide if tw >= th else plan_tall)(source, tw, th)
+    return (plan_wide if tw >= th else plan_tall)(source, tw, th, keep)
 
 
 def reflow(source, tw: int, th: int, ss: int = 2) -> Image.Image:

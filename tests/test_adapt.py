@@ -449,6 +449,143 @@ def test_importance_map_cap_does_not_change_the_crop(source):
         assert all(abs(x - y) <= 2 for x, y in zip(a, b)), (fmt.name, a, b)
 
 
+# -------------------------------------- role inference / budget / override --
+def _info(i, name, bbox, has_type=False, role=None):
+    from adapt.infer import LayerInfo
+    return LayerInfo(index=i, name=name, bbox=bbox, has_type=has_type, role=role)
+
+
+def test_named_layers_are_never_reinterpreted():
+    # The whole inference pass must be inert on a properly named master, or
+    # every existing layout would shift under it.
+    from adapt.infer import infer_roles
+    named = [_info(0, "background", (0, 0, 1200, 1200), role="background"),
+             _info(1, "headline", (60, 80, 900, 200), True, "headline"),
+             _info(2, "footer-logo", (0, 1100, 1200, 1180), role="logo")]
+    assert infer_roles(named, 1200, 1200) == {}
+
+
+def test_full_canvas_art_above_a_named_fill_is_still_background():
+    # The reported shape: a plain fill *called* "Background" with the actual
+    # artwork stacked on top of it. Claiming only the fill leaves a 1200x1200
+    # painting as a draggable foreground box.
+    from adapt.infer import infer_roles
+    layers = [_info(0, "Background", (0, 0, 1200, 1200), role="background"),
+              _info(1, "BG", (0, 0, 1200, 1200)),
+              _info(2, "Vector Smart Object", (255, 633, 342, 744)),
+              _info(3, "Text", (45, 50, 601, 606), True),
+              _info(4, "Footer", (0, 908, 1200, 1200), True),
+              _info(5, "Group 1", (0, 834, 1200, 924))]
+    got = infer_roles(layers, 1200, 1200)
+    assert got[1] == "background"
+    assert got[3] == "headline"          # the largest type layer
+    assert got[4] == "disclaimer"        # wide + low + type
+    assert got[5] == "logo"              # wide, short, near the bottom
+    assert 2 not in got                  # a small anonymous shape stays generic
+
+
+def test_inference_does_not_promote_a_floating_full_canvas_layer():
+    # Full-canvas only counts as backdrop near the bottom of the stack; an
+    # overlay sitting on top of the content is not the background.
+    from adapt.infer import infer_roles
+    layers = [_info(i, f"L{i}", (0, 0, 40, 40)) for i in range(9)]
+    layers.append(_info(9, "overlay", (0, 0, 1200, 1200)))
+    assert infer_roles(layers, 1200, 1200).get(9) != "background"
+
+
+@needs_master
+def test_budget_hides_rather_than_drops(source):
+    # A crowded reflow thins itself, but nothing is lost: what it removes comes
+    # back as a hidden placement, so the layers panel can restore it.
+    from adapt.layout import LayoutPlan, Placement
+    from adapt.pipeline import _attach_hidden, review
+    plan = LayoutPlan(970, 90, strategy="reflow-wide")
+    _attach_hidden(plan, source, [0, 1])
+    assert len(plan.placements) == 2
+    assert all(not p.visible for p in plan.placements)
+    assert all(p.element in (0, 1) for p in plan.placements)
+    # ...and they sit inside the frame, so switching one on is sensible
+    for p in plan.placements:
+        assert 0 <= p.x and 0 <= p.y
+        assert p.x + p.w <= plan.width + 0.5 and p.y + p.h <= plan.height + 0.5
+    # review reports the hiding, but does not fault the hidden boxes themselves
+    problems = review(plan, source)
+    assert any("hidden" in p for p in problems)
+    assert not any("shrink below" in p for p in problems)
+
+
+@needs_master
+def test_budget_leaves_an_uncrowded_layout_alone(source):
+    # The six shipped sizes fit as they are; the budget must not thin them.
+    from adapt.pipeline import plan_reflow
+    for fmt in FORMATS:
+        if fmt.name in ("200x200", "300x250"):
+            continue                      # flat-composite path, no elements
+        plan = plan_reflow(source, fmt.width, fmt.height)
+        assert all(p.visible for p in plan.placements), fmt.name
+
+
+def test_protected_roles_survive_any_budget():
+    from adapt.pipeline import PROTECTED_ROLES
+    # The regulatory line is the *least prominent* element, which priority alone
+    # would read as the most disposable. It must be pinned.
+    assert "disclaimer" in PROTECTED_ROLES and "logo" in PROTECTED_ROLES
+
+
+@needs_master
+def test_role_override_round_trips_and_reaches_the_cli(source, tmp_path):
+    from adapt import store
+    from adapt.web import create_app
+    app = create_app("input", str(tmp_path))
+    c = app.test_client()
+    assert c.post("/api/open", json={"path": INPUT}).status_code == 200
+    man = c.get("/api/manifest").get_json()
+    assert man["roles"][0] == "logo"                  # vocabulary, best first
+    assert all(e["assigned"] is False for e in man["elements"])
+
+    target = man["elements"][0]
+    assert c.post("/api/roles", json={"index": target["index"],
+                                      "role": "scheme"}).status_code == 200
+    assert c.post("/api/roles", json={"index": 0, "role": "nope"}).status_code == 400
+    assert c.post("/api/roles", json={"index": 9999, "role": "logo"}).status_code == 404
+
+    after = c.get("/api/manifest").get_json()["elements"][0]
+    assert after["role"] == "scheme" and after["assigned"] is True
+
+    # persisted alongside the layouts, and applied to a freshly loaded source
+    saved = store.load_roles(INPUT, str(tmp_path))
+    assert saved == {store.role_key(target["index"], target["name"]): "scheme"}
+    fresh = create_app("input", str(tmp_path)).test_client()
+    fresh.post("/api/open", json={"path": INPUT})
+    assert fresh.get("/api/manifest").get_json()["elements"][0]["role"] == "scheme"
+
+
+@needs_master
+def test_role_override_matches_by_name_when_the_index_moves(source):
+    # A PSD can carry four layers called "Vector Smart Object", so a name alone
+    # does not identify one; an index alone breaks the moment a layer is added.
+    from adapt import store
+
+    class Stub:
+        def __init__(self, name):
+            self.name, self.role = name, "object"
+
+    class Src:
+        pass
+
+    s = Src()
+    s.elements = [Stub("intro"), Stub("dup"), Stub("logo-lockup"), Stub("dup")]
+    # exact (index, name) hit
+    assert store.apply_roles(s, {store.role_key(2, "logo-lockup"): "logo"}) == 1
+    assert s.elements[2].role == "logo"
+    # index moved, but the name is unique -> still binds
+    assert store.apply_roles(s, {store.role_key(0, "logo-lockup"): "cta"}) == 1
+    assert s.elements[2].role == "cta"
+    # ambiguous name with a wrong index -> refuses to guess
+    assert store.apply_roles(s, {store.role_key(0, "dup"): "headline"}) == 0
+    assert [e.role for e in s.elements] == ["object", "object", "cta", "object"]
+
+
 # --------------------------------------------------- background framing --
 def _stripes(w, h):
     """An image whose content differs everywhere, so any reframing is visible."""

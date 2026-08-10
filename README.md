@@ -103,6 +103,41 @@ multiplier on that fit) and `focus_x` / `focus_y` (which point of the image sits
 at the box centre). Their defaults reproduce the original behaviour exactly, so
 plans saved before they existed render unchanged.
 
+### When the layers are not named
+
+Everything above assumes the master's layers say what they are (`headline`,
+`cta`, `footer-logo`) — `classify()` reads the role out of the name. Plenty of
+real files do not: a PSD of `Vector Smart Object`, `L copy 2`, `Shape 2` and
+`Group 1` classifies as **zero** roles, and the whole semantic layer collapses.
+Every element arrives as a generic `object`, so nothing outranks anything, the
+backdrop is handed over as a draggable foreground box, and fifteen equals get
+laid out in a 970×90 banner until the message is unreadable.
+
+Three things recover from that, in order of how little they ask of you:
+
+1. **Structure, when names fail** (`adapt/infer.py`). A full-canvas layer low in
+   the stack is the backdrop *whatever it is called* — including artwork sitting
+   on top of a plain fill named `Background`, which is the usual arrangement and
+   the one that leaves a 1200×1200 painting draggable. Type layers become
+   headline/subheadline by size; a wide, low type layer is the disclaimer; a
+   wide, short bar near the bottom is the logo lock-up. This only ever fills in
+   roles the name pass left blank, so a well-named master is untouched.
+2. **An element budget** (`pipeline.plan_reflow`). `ROLE_PRIORITY` always
+   documented deciding "which elements survive when a target is too small" —
+   now it does. A layout that would trip a `review()` warning drops its
+   lowest-priority element and is rebuilt, until it fits. Between elements the
+   roles rank equally, the importance map breaks the tie, so a pale repeated
+   watermark goes before the illustration carrying the message. `logo` and
+   `disclaimer` are never dropped: the regulatory line is the least *prominent*
+   element, which is the opposite of optional. Nothing is lost — everything
+   dropped comes back as a **hidden placement**, one click away in the layers
+   panel, and `review()` says how many and why.
+3. **A role picker** in the editor. Inference is a guess and says so; the
+   properties panel shows the role as a dropdown and whether it was guessed or
+   assigned by you. Changing one re-plans every size, persists to
+   `output/layouts/<master>.json`, and is applied by `--use-layout`. Six
+   dropdown picks buy the layout quality a fully-named PSD gets.
+
 ### Wrapping must be reproducible
 
 A re-wrapped text box is described by **(width, line height)** alone — its height

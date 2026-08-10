@@ -18,7 +18,7 @@ import numpy as np
 from PIL import Image
 
 from .elements import Element, classify
-from . import log, saliency
+from . import infer, log, saliency
 
 # Longest side kept for layout work. Comfortably above the largest output
 # (1200px) even before 2x supersampling, so nothing visible is lost.
@@ -198,6 +198,7 @@ def load_psd(path: str, max_dim: int | None = None) -> Source:
         composite = _composite_scaled(psd, viewport, k, "RGB")
 
     background = None
+    bg_layers = []                    # backdrop layers, bottom-most first
     elements: list[Element] = []
 
     def add_layer_as_element(layer, role):
@@ -226,16 +227,30 @@ def load_psd(path: str, max_dim: int | None = None) -> Source:
         log.log(f"element {layer.name!r} -> {role} {img.width}x{img.height} "
                 f"at {bbox} ({log.mb(img):.0f}MB)", 1)
 
-    with log.step(f"extract {len(list(psd))} top-level layers"):
-        for layer in psd:
-            role = classify(layer.name)
+    # Names first, structure second. Nothing here overrides a name that already
+    # carried a role; this only fills in the blanks, which is what makes a PSD
+    # of 'Vector Smart Object' and 'Group 1' usable at all. See adapt.infer.
+    tops = list(psd)
+    infos = []
+    for i, layer in enumerate(tops):
+        l, t, r, b = layer.bbox
+        infos.append(infer.LayerInfo(
+            index=i, name=layer.name,
+            bbox=(max(0, l), max(0, t), min(W, r), min(H, b)),
+            has_type=_has_type(layer), role=classify(layer.name)))
+    inferred = infer.infer_roles(infos, W, H)
+
+    with log.step(f"extract {len(tops)} top-level layers"):
+        for i, layer in enumerate(tops):
+            role = infos[i].role or inferred.get(i)
 
             if role == "background":
                 # The one place banding pays: a background group stacks several
                 # full-canvas sub-layers, and compositing them in one piece is
                 # what makes a big master unusable on a modest machine.
-                background = _composite_scaled(layer, viewport, k, "RGB", band=True)
-                log.log(f"background layer {layer.name!r}", 1)
+                bg_layers.append(layer)
+                log.log(f"background layer {layer.name!r}"
+                        + ("" if infos[i].role else " (inferred)"), 1)
                 continue
 
             # The footer group bundles the logo AND the disclaimer bar; split them
@@ -253,7 +268,22 @@ def load_psd(path: str, max_dim: int | None = None) -> Source:
                 role = "object"
             add_layer_as_element(layer, role)
 
-    # Fall back to the flattened render if there was no explicit background group.
+    # One backdrop layer is composited exactly as before. Several — a plain fill
+    # with the artwork stacked on it — are flattened in stack order, so nothing
+    # below shows through a transparent patch in the layer above.
+    if len(bg_layers) == 1:
+        background = _composite_scaled(bg_layers[0], viewport, k, "RGB", band=True)
+    elif bg_layers:
+        for lyr in bg_layers:
+            part = _composite_scaled(lyr, viewport, k, "RGBA", band=True)
+            if part is None:
+                continue
+            if background is None:
+                background = Image.new("RGB", part.size, (255, 255, 255))
+            background.paste(part, (0, 0), part)
+        log.log(f"backdrop flattened from {len(bg_layers)} layers", 1)
+
+    # Fall back to the flattened render if there was no background group at all.
     if background is None:
         log.log("no background layer found — using the flattened composite", 1)
         background = composite.copy()

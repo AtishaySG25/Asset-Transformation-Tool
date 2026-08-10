@@ -212,6 +212,50 @@ drag-to-reorder, so `z` and the placement array stay in step however the order
 is changed — the plan reads the way it draws. The bracket keys match on
 `e.code` as well as `e.key`, because Shift turns `[` into `{`.
 
+## 9. Masters whose layers are not named
+
+Triggered by `2_Login but No Portfolio.psd`: 19 top-level layers called
+`Vector Smart Object` (x4), `L copy 2`, `Shape 2`, `Group 1`. `classify()` reads
+roles out of *names*, so it placed **zero** of them. Consequences, all measured:
+the 1200x1200 `BG` artwork was extracted as a draggable foreground element while
+the loader logged "no background layer found"; all 16 elements shared priority
+62, so nothing outranked anything; `plan_wide`'s footer bar needs `role=="logo"`
+and never formed. The banners came out as a row of fifteen decorative icons with
+the headline shrunk to an illegible dot.
+
+Three changes, none of which touch a well-named master:
+
+- **`adapt/infer.py`** — roles from structure when the name pass finds none. A
+  full-canvas layer low in the stack is backdrop *whatever it is called*: the
+  common arrangement is a plain fill named `Background` with the real artwork
+  above it, and claiming only the fill is what left that artwork draggable.
+  Several backdrop layers are now flattened in stack order rather than the last
+  one silently winning. Type layers become headline/subheadline by area; wide +
+  low + type is the disclaimer; a wide short bar near the bottom is the logo.
+- **An element budget** (`pipeline.plan_reflow`) — `ROLE_PRIORITY` has always
+  been documented as deciding "which elements survive when a target format is
+  too small to hold them all", and nothing in the codebase ever dropped
+  anything. Now a layout that would trip a `review()` warning drops its
+  lowest-priority element and rebuilds until it fits. Using `review`'s own
+  thresholds is what makes this safe: a master that already fits is never
+  touched. Ties are broken by the importance map, so a pale repeated watermark
+  goes before the illustration carrying the message. `logo` and `disclaimer` are
+  pinned — priority alone drops the regulatory line first, since it is the least
+  *prominent* element, which is the opposite of optional. Everything dropped is
+  re-attached as a **hidden placement** at its proportional position, so nothing
+  is lost and the layers panel restores it in one click; `review()` reports the
+  count and reason instead of the size warnings it used to emit.
+- **A role picker** (`POST /api/roles`) — inference is a guess, so it is
+  correctable. The properties panel shows an element's role as a dropdown over
+  the engine's own vocabulary, and whether it was guessed or assigned. One
+  change re-plans every format, persists to the layouts file keyed on
+  `"<index>:<name>"` (neither alone identifies a layer when four share a name),
+  and is applied by `--use-layout` before the importance map is built.
+
+On that PSD the banners go from 15 elements at illegible size to headline + CTA,
+riskometer/disclaimer panel and logo bar. `Axis.psd` stays byte-identical at all
+six sizes, asserted against a worktree at the previous commit.
+
 ## New CLI flags
 
 ```
@@ -233,7 +277,7 @@ adapt/web/templates/{editor.html,gallery.html}
 
 ## Testing
 
-32 pytest cases (up from 8 on `main`), covering: everything on `main`
+40 pytest cases (up from 8 on `main`), covering: everything on `main`
 (routing, role extraction, importance map, exact dimensions, text reflow,
 flat-image fallback) plus — plan JSON round-trips render byte-identically;
 re-wrapped text reproduces its own recorded wrap exactly; manual edits
@@ -250,7 +294,13 @@ size and focus; zooming out really does reveal more than a cover crop can;
 focus pans content without moving the frame; focus cannot open a gap while the
 imagery covers; `contain` fits the whole image; framing survives a plan
 round-trip to the renderer; `base_image` still defaults to the old stretch;
-and both downloads arrive as attachments carrying the *edited* layout.
+and both downloads arrive as attachments carrying the *edited* layout;
+role inference is inert on a named master and recovers background/headline/
+disclaimer/logo on an unnamed one; a floating full-canvas overlay is not
+mistaken for backdrop; the budget hides rather than drops and leaves an
+uncrowded layout alone; the disclaimer and logo are pinned; and a role
+override round-trips to disk, survives a reload, reaches the CLI, and refuses
+to bind an ambiguous duplicate layer name.
 
 Also manually verified end-to-end in a real Chromium browser (Playwright,
 throwaway venv, not the project's own): drag, handle-resize with genuine
@@ -272,6 +322,12 @@ both `Axis.psd` (1200x1200) and the 24-megapixel Women's Day PSD.
 - Banded compositing (memory fix) is applied only to the background group;
   it was measured to change output on other layer types and was not
   extended there.
+- Role inference is a guess by design — it reads structure, not intent. It is
+  logged, shown as "guessed" in the editor, and overridable; it is not meant to
+  be right every time.
+- The element budget thins a layout to what fits legibly, which on a very
+  decorative master means most decoration is hidden. That is a judgement about
+  legibility, not about the design; every hidden element is one click away.
 - Export is PNG only — no JPEG option currently exists in the tool, despite
   earlier conversation referring to JPG/PNG export.
 - Below `zoom` 1 a background no longer fills its box; the shortfall is left
