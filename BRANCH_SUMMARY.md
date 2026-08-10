@@ -197,6 +197,21 @@ idle period had to fault it all back before it could answer. Every format render
 correctly — verified through the CLI, the Flask test client, real HTTP, and a
 real browser. `--max-dim` remains the lever if a master is too big for comfort.
 
+## 8. Explicit stacking commands
+
+Widening a background until it spans the canvas puts it over whatever it now
+covers, and the only way to fix that was to drag a row to the right slot in the
+layers list. Stacking is now a direct command on the selection: **Bring to
+front** / **Send to back** in the properties panel and on each layer row (shown
+on hover, so layer names keep the full panel width at rest), `[` / `]` for one
+step and `Ctrl+Shift+[` / `]` to go all the way. The panel also shows the
+selection's depth (`8 of 11`), and the end buttons disable at the ends.
+
+One `stack()` / `restackTo()` pair now backs the buttons, the keys and
+drag-to-reorder, so `z` and the placement array stay in step however the order
+is changed — the plan reads the way it draws. The bracket keys match on
+`e.code` as well as `e.key`, because Shift turns `[` into `{`.
+
 ## New CLI flags
 
 ```

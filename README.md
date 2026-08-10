@@ -127,8 +127,13 @@ dependency-free vanilla-JS front end — no CDN, works offline.
   placement a draggable/resizable box. Layers panel for stacking (drag to
   reorder) and visibility; properties panel for numeric x/y/w/h, line height,
   alignment, bar colour, band feather/focus. Edge and centre **snapping**, arrow
-  key nudging, `[` / `]` restacking. Nothing may leave the frame — the editor
-  clamps exactly as the renderer does.
+  key nudging. Nothing may leave the frame — the editor clamps exactly as the
+  renderer does.
+* **Stacking is a direct command.** **Bring to front** / **Send to back** in the
+  properties panel (and on each layer row, on hover), `[` / `]` to move one step,
+  `Ctrl+Shift+[` / `]` to go all the way. Widening a background until it covers
+  its neighbours is the common case — one click puts it back behind them rather
+  than hunting for the right drop slot in the layers list.
 * **Text behaves like text.** Dragging a text box's side re-wraps it through
   `textflow` on the server and returns the real block; dragging top/bottom
   changes the type size. Glyphs are never stretched. Alignment is left, centre,

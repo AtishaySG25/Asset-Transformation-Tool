@@ -564,8 +564,12 @@ function drawLayers() {
     row.innerHTML = `<span class="grip">⠿</span>
       <span class="lname">${label(p)}</span>
       <span class="lrole">${p.kind === "element" ? p.role : p.kind.replace("_", " ")}</span>
+      <button class="eye stackbtn" data-stack="front" title="bring to front">⤒</button>
+      <button class="eye stackbtn" data-stack="back" title="send to back">⤓</button>
       <button class="eye" title="show / hide">${p.visible ? "◉" : "○"}</button>`;
     row.onclick = (e) => {
+      const where = e.target.dataset.stack;
+      if (where) return stack(p, where);
       if (e.target.classList.contains("eye")) {
         snapshot();
         p.visible = !p.visible;
@@ -599,10 +603,32 @@ function reorder(dragId, targetId, above) {
   const rest = order.filter((p) => p.id !== dragId);
   const at = rest.findIndex((p) => p.id === targetId);
   rest.splice(above ? at + 1 : at, 0, moving);
-  rest.forEach((p, i) => { p.z = i; });
-  plan.placements = rest;
+  restackTo(rest);
+}
+
+/* Re-seat a bottom->top ordering onto the plan. Both `z` and the array order are
+   kept in step so the plan reads the same way it draws. */
+function restackTo(order) {
+  order.forEach((p, i) => { p.z = i; });
+  plan.placements = order;
   paint();
   markDirty();
+}
+
+/* Explicit stacking commands. Dragging a background out to full width puts it
+   over whatever it now covers, and hunting for the right drop slot in the layers
+   list is a poor way to fix that — so front/back/one-step are direct actions on
+   the selection. */
+function stack(p, where) {
+  const order = byZ();
+  const i = order.findIndex((q) => q.id === p.id);
+  const j = { front: order.length - 1, back: 0,
+              forward: i + 1, backward: i - 1 }[where];
+  if (i < 0 || j === i || j < 0 || j > order.length - 1) return;
+  snapshot();
+  order.splice(i, 1);
+  order.splice(j, 0, p);
+  restackTo(order);
 }
 
 /* ---------------------------------------------------------- properties -- */
@@ -697,6 +723,18 @@ function drawProps() {
       <button data-do="hide">${p.visible ? "Hide" : "Show"}</button>
     </div>`;
 
+  const depth = byZ().findIndex((q) => q.id === p.id);
+  const topmost = depth === plan.placements.length - 1;
+  html += `<div class="prop"><label>stacking</label>
+      <span class="lrole">${depth + 1} of ${plan.placements.length}${
+        topmost ? " (front)" : depth === 0 ? " (back)" : ""}</span></div>
+    <div class="rowbtns">
+      <button data-do="toFront" ${topmost ? "disabled" : ""}
+              title="Draw this on top of everything (Ctrl+Shift+])">Bring to front</button>
+      <button data-do="toBack" ${depth === 0 ? "disabled" : ""}
+              title="Draw this behind everything (Ctrl+Shift+[)">Send to back</button>
+    </div>`;
+
   if (p.kind === "element") {
     html += `<div class="divider"></div><div class="rowbtns">
       <button data-do="backdrop">${hasBackdrop(p) ? "Remove backdrop" : "Background behind"}</button>`;
@@ -706,8 +744,8 @@ function drawProps() {
     }
     html += `</div>`;
   }
-  html += `<div class="hint">Arrow keys nudge (Shift = 10px). [ and ] restack.
-           Ctrl+Z undo.</div>`;
+  html += `<div class="hint">Arrow keys nudge (Shift = 10px). [ and ] move one
+           step in the stack, Ctrl+Shift+[ / ] go all the way. Ctrl+Z undo.</div>`;
   host.innerHTML = html;
   wireProps(host, p);
 }
@@ -755,6 +793,9 @@ function wireProps(host, p) {
       if (a === "cropCancel") return endCrop(false);
       if (a === "uncrop") return resetCrop(p);
       if (a === "backdrop") return toggleBackdrop(p);
+      const moves = { toFront: "front", toBack: "back",
+                      forward: "forward", backward: "backward" };
+      if (moves[a]) return stack(p, moves[a]);   // takes its own snapshot
       snapshot();
       if (a === "bgWhole") {
         Object.assign(p.params, { fit: "contain", zoom: 1, focus_x: 0.5, focus_y: 0.5 });
@@ -912,6 +953,9 @@ $("export").onclick = async () => {
 };
 
 /* ------------------------------------------------------------ keyboard -- */
+const BRACKET = { "]": "up", "}": "up", BracketRight: "up",
+                  "[": "down", "{": "down", BracketLeft: "down" };
+
 document.addEventListener("keydown", (e) => {
   if (e.target.matches("input, select, textarea")) return;
   const ctrl = e.ctrlKey || e.metaKey;
@@ -938,15 +982,13 @@ document.addEventListener("keydown", (e) => {
     clampInside(p); syncBox(p); drawProps(); markDirty();
   } else if (e.key === "Escape") {
     select(null);
-  } else if (e.key === "[" || e.key === "]") {
-    snapshot();
-    const order = byZ();
-    const i = order.indexOf(p);
-    const j = e.key === "]" ? i + 1 : i - 1;
-    if (j >= 0 && j < order.length) {
-      [order[i].z, order[j].z] = [order[j].z, order[i].z];
-      paint(); markDirty();
-    }
+  } else if (BRACKET[e.key] || BRACKET[e.code]) {
+    // Ctrl+Shift goes all the way; bare [ / ] move one step. Matched on e.code
+    // as well because Shift turns "[" into "{" on most layouts.
+    e.preventDefault();
+    const up = (BRACKET[e.key] || BRACKET[e.code]) === "up";
+    const far = ctrl && e.shiftKey;
+    stack(p, up ? (far ? "front" : "forward") : (far ? "back" : "backward"));
   } else if (e.key === "Delete" || e.key === "Backspace") {
     snapshot();
     p.visible = !p.visible;

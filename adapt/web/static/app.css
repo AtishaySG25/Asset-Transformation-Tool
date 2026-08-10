@@ -160,6 +160,11 @@ body.actual-size .shot img { max-width: none; }
 .lname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lrole { font-size: 10px; color: var(--muted); }
 .eye { background: none; border: none; padding: 0 2px; color: var(--muted); font-size: 12px; }
+/* Stacking shortcuts stay out of the way until you point at a row, so layer
+   names keep the full width of the panel at rest. */
+.stackbtn { display: none; }
+.layer:hover .stackbtn, .layer.sel .stackbtn { display: inline; }
+.stackbtn:hover { color: var(--text); }
 .grip { color: #4b5262; cursor: grab; }
 
 .stage-wrap { flex: 1; overflow: auto; padding: 28px; }
