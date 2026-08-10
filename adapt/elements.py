@@ -3,14 +3,7 @@
 An :class:`Element` is one identifiable object (logo, headline, CTA button,
 riskometer, ...) with its pixels (RGBA, tight-cropped) and its bounding box on
 the source canvas. Roles carry a visual-hierarchy priority that decides which
-elements survive when a target format is too small to hold them all (see
-:func:`adapt.pipeline.plan_reflow`), how large re-wrapped text is set, and how
-the content-aware crop is weighted.
-
-:func:`classify` reads the role out of the layer's *name*, which tells us nothing
-at all when a master is full of ``Vector Smart Object`` and ``Group 1``. What it
-cannot place, :mod:`adapt.infer` recovers from structure, and the editor's role
-picker overrides either.
+elements survive when a target format is too small to hold them all.
 """
 from __future__ import annotations
 

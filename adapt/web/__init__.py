@@ -46,7 +46,6 @@ from flask import (Flask, abort, jsonify, render_template, request,
 
 from .. import formats as formats_mod
 from .. import log, saliency, store
-from ..elements import ROLE_PRIORITY
 from ..formats import FORMATS, Format
 from ..layout import LayoutPlan, Placement
 from ..pipeline import (_bgr, effective_strategy, plan_explode, plan_for_format,
@@ -64,9 +63,6 @@ class Session:
         self.path = path
         self.out_dir = out_dir
         self.source = load(path)
-        self.roles = store.load_roles(path, out_dir)     # hand-assigned, from disk
-        if store.apply_roles(self.source, self.roles):
-            log.log(f"applied {len(self.roles)} hand-assigned role(s)", 1)
         with log.step("importance map (saliency + edges + element boxes)") as s:
             self.importance = saliency.importance_map(_bgr(self.source.composite),
                                                       self.source.elements)
@@ -150,25 +146,8 @@ class Session:
         self._persist()
         log.log(f"reset {name} to the algorithmic layout")
 
-    def set_role(self, index: int, role: str):
-        """Reassign an element's role and rebuild every algorithmic layout.
-
-        Roles drive the whole layout engine — which element becomes the footer
-        bar, what gets re-wrapped, what survives a tight format — so changing one
-        invalidates the memoised plans and their renders. Hand-edited plans are
-        left alone: those are the user's own arrangement, not the algorithm's.
-        """
-        el = self.source.elements[index]
-        el.role = role
-        self.roles[store.role_key(index, el.name)] = role
-        self.auto.clear()
-        self._renders.clear()
-        self.rev += 1
-        self._persist()
-        log.log(f"role: {el.name!r} -> {role} (algorithmic layouts rebuilt)")
-
     def _persist(self):
-        store.save(self.path, self.saved, self.custom, self.out_dir, self.roles)
+        store.save(self.path, self.saved, self.custom, self.out_dir)
 
     # -- description for the browser --------------------------------------
     def manifest(self) -> dict:
@@ -181,12 +160,8 @@ class Session:
                 {"index": i, "name": el.name, "role": el.role,
                  "is_type": bool(el.is_type), "bbox": list(el.bbox),
                  "w": el.width, "h": el.height,
-                 "assigned": store.role_key(i, el.name) in self.roles,
                  "url": url_for("element_png", index=i)}
                 for i, el in enumerate(src.elements)],
-            # The vocabulary the layout engine understands, best-first — so the
-            # editor's role picker never drifts from adapt.elements.
-            "roles": sorted(ROLE_PRIORITY, key=lambda r: -ROLE_PRIORITY[r]),
             "formats": [
                 {"name": f.name, "width": f.width, "height": f.height,
                  "strategy": effective_strategy(src, f),
@@ -357,28 +332,6 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
         if fmt in {x.name for x in FORMATS}:
             abort(400, "the six standard sizes cannot be removed")
         s.drop_format(fmt)
-        return jsonify(s.manifest())
-
-    @app.post("/api/roles")
-    def api_set_role():
-        """Assign an element's role by hand.
-
-        Role inference from layer names (and, failing that, from structure) is a
-        guess; this is how the user corrects it. Because roles are what the
-        layout engine reasons about, one correction re-plans every format.
-        """
-        d = request.get_json(silent=True) or {}
-        s = session()
-        try:
-            index = int(d.get("index"))
-        except (TypeError, ValueError):
-            abort(400, "index must be a whole number")
-        role = str(d.get("role") or "")
-        if role not in ROLE_PRIORITY:
-            abort(400, f"unknown role {role!r}")
-        if not 0 <= index < len(s.source.elements):
-            abort(404, f"no element {index}")
-        s.set_role(index, role)
         return jsonify(s.manifest())
 
     @app.get("/api/review")

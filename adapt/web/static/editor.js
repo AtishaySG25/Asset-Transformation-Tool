@@ -661,21 +661,8 @@ function drawProps() {
   }
 
   let html = `<div class="prop"><label>name</label><b>${label(p)}</b></div>
-              <div class="prop"><label>kind</label>${p.kind}</div>`;
-  // The role is not a label — it is what the layout engine reasons about (which
-  // element becomes the footer bar, what survives a tight format). On a master
-  // with unhelpful layer names it is guessed, so it has to be correctable.
-  if (p.kind === "element" && p.element !== null) {
-    const meta = manifest.elements[p.element] || {};
-    html += `<div class="prop"><label>role</label>
-        <select data-role="${p.element}">${(manifest.roles || []).map((r) =>
-          `<option ${p.role === r ? "selected" : ""}>${r}</option>`).join("")}
-      </select></div>
-      <div class="hint">${meta.assigned ? "Assigned by you."
-        : "Guessed from the layer name or its shape and position."}
-        Changing it re-plans every size.</div>`;
-  }
-  html += `<div class="divider"></div>`;
+              <div class="prop"><label>kind</label>${p.kind}${p.role ? " · " + p.role : ""}</div>
+              <div class="divider"></div>`;
   html += num("x", p.x, "x") + num("y", p.y, "y");
   html += num("width", p.w, "w");
   html += isText(p)
@@ -764,10 +751,6 @@ function drawProps() {
 }
 
 function wireProps(host, p) {
-  const roleSel = host.querySelector("[data-role]");
-  if (roleSel) roleSel.onchange = () => setRole(Number(roleSel.dataset.role),
-                                                roleSel.value);
-
   host.querySelectorAll("[data-on]").forEach((inp) => {
     const commit = (live) => {
       const k = inp.dataset.on;
@@ -830,28 +813,6 @@ function wireProps(host, p) {
       syncBox(p); drawLayers(); drawProps(); markDirty();
     };
   });
-}
-
-/* Correcting a role re-plans every format server-side, so the algorithmic layout
-   for this one is re-fetched. A hand-edited layout is deliberately left alone —
-   it is the user's arrangement, not the algorithm's — so we say so rather than
-   silently discarding their work or silently doing nothing. */
-async function setRole(index, role) {
-  const wasEdited = !$("editedBadge").hidden;
-  try {
-    manifest = await api("/api/roles", jsonReq("POST", { index, role }));
-  } catch (e) {
-    toast(e.message, true);
-    return drawProps();                       // put the select back
-  }
-  if (wasEdited) {
-    drawProps();
-    toast(`role set to ${role}. This layout is hand-edited, so it is unchanged `
-          + `— "Reset to algorithm" to lay it out again.`);
-  } else {
-    await loadPlan();
-    toast(`role set to ${role} — every size re-planned`);
-  }
 }
 
 /* Put the master's own background imagery directly behind one element, as its

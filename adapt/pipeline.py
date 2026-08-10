@@ -152,101 +152,6 @@ def _raw_placement(idx: int, el, x, y, w, h) -> Placement:
 MIN_ELEMENT_PX = 6
 MIN_LINE_PX = 4
 
-# Never budgeted out of a layout, however tight the format: the brand mark and
-# the regulatory line are not the algorithm's to decide about. Priority alone
-# would drop the disclaimer first — it is the least *prominent* element, which is
-# the opposite of optional.
-PROTECTED_ROLES = ("logo", "disclaimer")
-
-
-def _too_crowded(plan: LayoutPlan) -> bool:
-    """True when a layout has more in it than the canvas can show legibly.
-
-    Deliberately the same thresholds :func:`review` reports on, so the engine
-    only ever thins a layout that would otherwise be flagged as broken — a
-    master that already fits is never touched.
-    """
-    vis = [p for p in plan.placements if p.kind == "element" and p.visible]
-    if any(min(p.w, p.h) < MIN_ELEMENT_PX for p in vis):
-        return True
-    area = plan.width * plan.height
-    return bool(area) and sum(p.w * p.h for p in vis) > 1.25 * area
-
-
-def _attach_hidden(plan: LayoutPlan, source: Source, dropped: list[int]):
-    """Re-attach budgeted-out elements as hidden placements.
-
-    They keep their proportional position from the master, so switching one back
-    on in the layers panel puts it somewhere sensible rather than at the origin.
-    Nothing is lost — the layout is thinned, not the content.
-    """
-    sx, sy = plan.width / max(1, source.width), plan.height / max(1, source.height)
-    for idx in dropped:
-        el = source.elements[idx]
-        l, t, r, b = el.bbox
-        w = max(1.0, min((r - l) * sx, plan.width))
-        h = max(1.0, min((b - t) * sy, plan.height))
-        plan.add(Placement(id=element_id(idx, el), kind="element",
-                           x=max(0.0, min(l * sx, plan.width - w)),
-                           y=max(0.0, min(t * sy, plan.height - h)),
-                           w=w, h=h, element=idx, name=el.name, role=el.role,
-                           visible=False, params={"mode": "stretch"}))
-
-
-def _element_weight(el, importance: np.ndarray | None) -> float:
-    """How much of the frame's interest this element carries, 0..1.
-
-    Used to choose between elements the roles rank equally — a master with a
-    dozen anonymous ``object`` layers gives priority nothing to work with, but a
-    pale repeated watermark and the illustration carrying the message score very
-    differently on saliency and edges.
-    """
-    if importance is None:
-        return 0.0
-    h, w = importance.shape[:2]
-    l, t, r, b = el.bbox
-    l, t = max(0, min(int(l), w - 1)), max(0, min(int(t), h - 1))
-    r, b = max(l + 1, min(int(r), w)), max(t + 1, min(int(b), h))
-    return float(importance[t:b, l:r].mean())
-
-
-def plan_reflow(source: Source, tw: int, th: int,
-                importance: np.ndarray | None = None) -> LayoutPlan:
-    """A reflow layout that fits, hiding the least important elements if it must.
-
-    Fifteen elements do not go into a 970x90 banner: laid out as equals they all
-    shrink past legibility and the message is lost among the decoration. So when
-    a layout comes out over-full, the lowest-priority element is dropped and it
-    is built again — that is what :data:`~adapt.elements.ROLE_PRIORITY` is for,
-    and why correcting a role in the editor changes what survives.
-
-    Between elements the roles rank equally, the least *interesting* goes first
-    by the importance map — otherwise a pale repeated watermark outlives the
-    illustration carrying the message, purely because both are ``object``.
-    Everything dropped comes back as a hidden placement, one click from
-    returning in the layers panel.
-    """
-    keep = set(range(len(source.elements)))
-    plan = reflow_mod.plan_for(source, tw, th, keep)
-    dropped: list[int] = []
-    while _too_crowded(plan):
-        free = [i for i in keep if source.elements[i].role not in PROTECTED_ROLES]
-        if len(free) <= 1:            # only the untouchable ones left — stop
-            break
-        victim = min(free, key=lambda i: (source.elements[i].priority,
-                                          _element_weight(source.elements[i],
-                                                          importance)))
-        keep.discard(victim)
-        dropped.append(victim)
-        plan = reflow_mod.plan_for(source, tw, th, keep)
-    if dropped:
-        _attach_hidden(plan, source, dropped)
-        log.log(f"{tw}x{th}: hid {len(dropped)} of {len(source.elements)} elements "
-                f"to keep the rest legible ("
-                f"{', '.join(source.elements[i].name for i in dropped[:4])}"
-                f"{', ...' if len(dropped) > 4 else ''})", 1)
-    return plan
-
 
 def review(plan: LayoutPlan, source: Source) -> list[str]:
     """Reasons this plan is not usable at this size — empty means it is fine.
@@ -255,25 +160,14 @@ def review(plan: LayoutPlan, source: Source) -> list[str]:
     layout engine actually managed to do rather than guessing in advance.
     """
     problems = []
-    # Hidden placements are not drawn, so they cannot be too small, spill, or
-    # crowd anything — judging them would report faults in what is not there.
-    shown = [p for p in plan.placements if p.visible]
-
-    hidden = [p for p in plan.placements if p.kind == "element" and not p.visible]
-    if hidden:
-        problems.append(
-            f"{len(hidden)} element(s) hidden so the rest stay legible "
-            f"({', '.join(sorted({p.role or p.name for p in hidden}))}) — "
-            "switch any back on with the eye in the layers panel")
-
-    tiny = [p for p in shown
+    tiny = [p for p in plan.placements
             if p.kind == "element" and min(p.w, p.h) < MIN_ELEMENT_PX]
     if tiny:
         problems.append(
             f"{len(tiny)} element(s) shrink below {MIN_ELEMENT_PX}px: "
             f"{', '.join(sorted({p.role or p.name for p in tiny}))}")
 
-    small_text = [p for p in shown
+    small_text = [p for p in plan.placements
                   if p.params.get("mode") == "reflow"
                   and p.params.get("line_h", 99) < MIN_LINE_PX]
     if small_text:
@@ -282,7 +176,7 @@ def review(plan: LayoutPlan, source: Source) -> list[str]:
 
     # The renderer clamps stray tiles into the frame, so an overflowing plan
     # does not crash — it silently stacks things on top of each other instead.
-    spill = [p for p in shown
+    spill = [p for p in plan.placements
              if p.x < -0.5 or p.y < -0.5
              or p.x + p.w > plan.width + 0.5 or p.y + p.h > plan.height + 0.5]
     if spill:
@@ -290,7 +184,7 @@ def review(plan: LayoutPlan, source: Source) -> list[str]:
                         "pushed back inside, overlapping their neighbours")
 
     area = plan.width * plan.height
-    used = sum(p.w * p.h for p in shown if p.kind == "element")
+    used = sum(p.w * p.h for p in plan.placements if p.kind == "element")
     if area and used > 1.25 * area:
         problems.append("elements need more room than the canvas has — "
                         "they will overlap heavily")
@@ -306,7 +200,7 @@ def plan_for_format(source: Source, fmt, importance: np.ndarray) -> LayoutPlan:
         elif strategy == "crop":
             plan = plan_fit(source, fmt.width, fmt.height)
         else:
-            plan = plan_reflow(source, fmt.width, fmt.height, importance)
+            plan = reflow_mod.plan_for(source, fmt.width, fmt.height)
         problems = review(plan, source)
         s["note"] = (f"{len(plan.placements)} placements"
                      + (f", {len(problems)} warning(s)" if problems else ""))
@@ -368,13 +262,6 @@ def run(input_path: str, out_dir: str = "output", debug: bool = True,
     """Render every format. With ``use_saved``, any layout hand-edited in the web
     editor replaces the algorithmic one for that format."""
     source = load(input_path)
-    if use_saved:
-        # Roles assigned in the editor change what the algorithm builds, so they
-        # have to be in place before the importance map or any plan is made —
-        # otherwise a headless re-render disagrees with what the editor showed.
-        n = store.apply_roles(source, store.load_roles(input_path, out_dir))
-        if n:
-            log.log(f"applied {n} hand-assigned role(s)", 1)
     with log.step("importance map (saliency + edges + element boxes)") as s:
         importance = saliency.importance_map(_bgr(source.composite), source.elements)
         s["note"] = f"{importance.shape[1]}x{importance.shape[0]}"
