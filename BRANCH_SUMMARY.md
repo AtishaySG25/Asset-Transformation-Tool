@@ -6,13 +6,19 @@ web tool for reviewing and hand-correcting those layouts, plus a resolution/
 memory rework needed to make it usable on large PSDs. Nothing here has been
 merged to `main`.
 
-5 commits, in order:
+Commits, in order:
 
 1. `db53df5` — Add a manual layout editor, built on layout plans
 2. `dc0b83b` — Editor: opacity, crop, undo, custom sizes, justify, canvas resize
 3. `6c82956` — Editor: keep the rasterised master alongside the canvas
 4. `f432b4f` — Work at a sane resolution, and say what you are doing
 5. `bff0c2c` — Frame the background by hand; make downloads reliable
+6. `dafeecf` — Add bring-to-front and send-to-back
+7. (this one) — Keep cached images from outliving the asset they belong to
+
+`e425bd2` (role inference / element budget / role picker) was committed and then
+reverted by `8477418`; the branch tree is byte-identical to `dafeecf`. The work
+is still in history if it is ever wanted again.
 
 ## 1. Layout plans (the prerequisite refactor)
 
@@ -212,6 +218,27 @@ drag-to-reorder, so `z` and the placement array stay in step however the order
 is changed — the plan reads the way it draws. The bracket keys match on
 `e.code` as well as `e.key`, because Shift turns `[` into `{`.
 
+## 9. Switching assets in one session
+
+Reported: pick a different PSD from the gallery and the master panel keeps
+showing the previous one. Not a stale server — `/api/master.png` returns the
+right bytes for whichever asset is open. The URLs are the problem:
+`/api/master.png?w=560`, `/api/element/<i>.png` and `/api/tile.png?...` are all
+served `max-age=3600` and carry no identity of which master is loaded, so the
+browser answers from cache and never asks again. The caption *does* update
+(manifest JSON is uncached), which is what makes it read as a rendering bug
+rather than a caching one.
+
+Each `Session` now mints a **source token** and the client stamps it into those
+three URL families. Long caching is kept — the token is what makes it safe.
+Re-opening the same file mints a new token, so a PSD edited on disk shows up
+instead of serving the copy from before the edit.
+
+Verified by hashing the pixels the `<img>` is actually *displaying* (via canvas)
+rather than the URL it requested, with the HTTP cache left on — the same test
+run against the pre-fix build fails 6 of 8 checks, with the master hash
+identical across the switch.
+
 ## New CLI flags
 
 ```
@@ -233,7 +260,7 @@ adapt/web/templates/{editor.html,gallery.html}
 
 ## Testing
 
-32 pytest cases (up from 8 on `main`), covering: everything on `main`
+33 pytest cases (up from 8 on `main`), covering: everything on `main`
 (routing, role extraction, importance map, exact dimensions, text reflow,
 flat-image fallback) plus — plan JSON round-trips render byte-identically;
 re-wrapped text reproduces its own recorded wrap exactly; manual edits
@@ -250,7 +277,9 @@ size and focus; zooming out really does reveal more than a cover crop can;
 focus pans content without moving the frame; focus cannot open a gap while the
 imagery covers; `contain` fits the whole image; framing survives a plan
 round-trip to the renderer; `base_image` still defaults to the old stretch;
-and both downloads arrive as attachments carrying the *edited* layout.
+and both downloads arrive as attachments carrying the *edited* layout;
+and opening a second master mints a fresh token that reaches every cached
+image URL, so switching assets cannot show the previous one's pictures.
 
 Also manually verified end-to-end in a real Chromium browser (Playwright,
 throwaway venv, not the project's own): drag, handle-resize with genuine
@@ -284,4 +313,5 @@ both `Axis.psd` (1200x1200) and the 24-megapixel Women's Day PSD.
 
 ## Branch state
 
-Working tree clean, 5 commits ahead of `main`, not merged.
+Working tree clean, ahead of `main`, not merged. Pushed to
+`origin/feature/layout-editor`.

@@ -71,6 +71,13 @@ class Session:
         self.custom = store.load_custom(path, out_dir)  # user-added target sizes
         self.auto: dict[str, LayoutPlan] = {}           # algorithmic, memoised
         self.rev = int(time.time())                     # cache-buster for renders
+        # Identity of *this* loaded master. The element/tile/master endpoints are
+        # cached for an hour, and their URLs would otherwise be identical for
+        # every asset — so opening a second PSD in the same session would redraw
+        # it with the first one's images. Stamped into those URLs by the client.
+        # Re-opening the same file mints a new token, which is what makes an
+        # edited-on-disk PSD show up rather than serving the stale copy.
+        self.token = f"{int(time.time() * 1000):x}"
         # The gallery asks for every format at once. Building and rendering them
         # one at a time keeps peak memory to a single canvas instead of eight,
         # which matters far more than the wall-clock difference.
@@ -160,7 +167,7 @@ class Session:
                 {"index": i, "name": el.name, "role": el.role,
                  "is_type": bool(el.is_type), "bbox": list(el.bbox),
                  "w": el.width, "h": el.height,
-                 "url": url_for("element_png", index=i)}
+                 "url": url_for("element_png", index=i, v=self.token)}
                 for i, el in enumerate(src.elements)],
             "formats": [
                 {"name": f.name, "width": f.width, "height": f.height,
@@ -169,6 +176,7 @@ class Session:
                  "custom": f.name not in {x.name for x in FORMATS}}
                 for f in self.all_formats()],
             "rev": self.rev,
+            "token": self.token,
         }
 
 

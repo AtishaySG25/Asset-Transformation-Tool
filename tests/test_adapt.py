@@ -190,6 +190,38 @@ def test_manual_edits_survive_a_save_and_reload(source, tmp_path):
     assert out.size == (fmt.width, fmt.height)
 
 
+def test_switching_assets_invalidates_cached_images(tmp_path):
+    """Opening a second master must not redraw it with the first one's pictures.
+
+    /api/element, /api/tile and /api/master are served ``max-age=3600`` and their
+    URLs are otherwise identical for every asset, so without a per-source token
+    the browser never re-requests them: the caption updates (JSON is uncached)
+    while the image does not.
+    """
+    from adapt.web import create_app
+    others = [p for p in (os.path.join("input", f) for f in sorted(os.listdir("input")))
+              if p.lower().endswith((".psd", ".png", ".jpg", ".jpeg"))
+              and os.path.abspath(p) != os.path.abspath(INPUT)]
+    if not os.path.exists(INPUT) or not others:
+        pytest.skip("needs two master assets in input/")
+
+    c = create_app("input", str(tmp_path)).test_client()
+    seen, masters = [], []
+    for path in (INPUT, others[0], INPUT):
+        assert c.post("/api/open", json={"path": path}).status_code == 200
+        man = c.get("/api/manifest").get_json()
+        seen.append(man["token"])
+        masters.append(c.get("/api/master.png?w=320").data)
+        # the token has to reach the URLs the browser actually caches on
+        assert all(f"v={man['token']}" in e["url"] for e in man["elements"])
+
+    assert len(set(seen)) == 3, "each open needs its own token, even re-opens"
+    assert masters[0] != masters[1], "different assets must render differently"
+    assert masters[0] == masters[2], "same asset must render the same"
+    # long caching is the point — the token is what makes it safe
+    assert "max-age=3600" in c.get("/api/master.png").headers["Cache-Control"]
+
+
 def test_web_api_round_trip(source, tmp_path):
     # Smoke-test the editor's own contract end to end through Flask.
     from adapt.web import create_app

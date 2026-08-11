@@ -160,6 +160,13 @@ dependency-free vanilla-JS front end — no CDN, works offline.
   PSD rasterised (`/api/master.png`, scaled for the sidebar, click for full size)
   so the original composition is always next to the one you are rearranging. It
   collapses if you want the room back.
+* **Switching assets is clean.** The element, tile and master endpoints are
+  cached for an hour, and their URLs would otherwise be identical for every
+  asset — so a second PSD opened in the same session was drawn with the first
+  one's pictures. Each load mints a **source token** (`manifest.token`) that is
+  stamped into all three, so the browser re-fetches exactly when the asset
+  changes and keeps caching hard the rest of the time. Re-opening the same file
+  mints a new token too, which is what makes a PSD edited on disk show up.
 * **Per format.** Moving something in `970x90` has no effect on `160x600`.
 * **Reset to algorithm** per format, **Show render** to see the true server
   render beside the canvas, **Export PNG** (saves the current format), **Export

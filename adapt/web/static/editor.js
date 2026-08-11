@@ -458,7 +458,7 @@ function startCrop(p) {
   layer.innerHTML = `<img class="cdim">
     <div class="croprect"><img class="cfull"></div>`;
   $("stage").appendChild(layer);
-  const src = `/api/element/${p.element}.png`;
+  const src = stamped(`/api/element/${p.element}.png`);
   layer.querySelector(".cdim").src = src;
   layer.querySelector(".cfull").src = src;
   handleEls(layer.querySelector(".croprect"));
