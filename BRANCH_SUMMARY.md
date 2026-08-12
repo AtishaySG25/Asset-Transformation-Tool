@@ -14,7 +14,7 @@ Commits, in order:
 4. `f432b4f` — Work at a sane resolution, and say what you are doing
 5. `bff0c2c` — Frame the background by hand; make downloads reliable
 6. `dafeecf` — Add bring-to-front and send-to-back
-7. (this one) — Keep cached images from outliving the asset they belong to
+7. `2b8fc52` — Keep cached images from outliving the asset they belong to
 
 `e425bd2` (role inference / element budget / role picker) was committed and then
 reverted by `8477418`; the branch tree is byte-identical to `dafeecf`. The work
