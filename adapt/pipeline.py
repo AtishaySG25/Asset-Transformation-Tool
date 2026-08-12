@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFilter
 
 from . import log, saliency, tiles, store
 from .formats import FORMATS, strategy_for
-from .layout import LayoutPlan, Placement, element_id
+from .layout import LayoutPlan, Placement, element_id, rebind
 from .psd_source import load, Source
 from .render import render_plan
 from .smartcrop import crop_box
@@ -98,7 +98,7 @@ def plan_explode(source: Source, tw: int, th: int) -> LayoutPlan:
         plan.add(Placement(id=element_id(idx, el), kind="element",
                            x=l * sx, y=t * sy, w=max(1.0, (r - l) * sx),
                            h=max(1.0, (b - t) * sy), element=idx,
-                           name=el.name, role=el.role,
+                           uid=el.uid, name=el.name, role=el.role,
                            params={"mode": "stretch"}))
     return plan
 
@@ -142,7 +142,7 @@ def _fit_box(el, max_w: float, max_h: float) -> tuple[float, float]:
 
 def _raw_placement(idx: int, el, x, y, w, h) -> Placement:
     return Placement(id=element_id(idx, el), kind="element", x=x, y=y, w=w, h=h,
-                     element=idx, name=el.name, role=el.role,
+                     element=idx, uid=el.uid, name=el.name, role=el.role,
                      params={"mode": "stretch"})
 
 
@@ -268,6 +268,12 @@ def run(input_path: str, out_dir: str = "output", debug: bool = True,
     saved = store.load(input_path, out_dir) if use_saved else {}
     if saved:
         log.log(f"manual layouts on disk: {', '.join(sorted(saved))}", 1)
+    for name, plan in saved.items():
+        # A stored plan names its elements as the extraction that built it did;
+        # point it back at this one before rendering. See `layout.rebind`.
+        for p in rebind(plan, source):
+            log.log(f"warning [{name}]: {p.uid or p.name or p.id!r} is no longer in "
+                    f"the master — that box will not draw", 2)
 
     os.makedirs(out_dir, exist_ok=True)
     formats = list(FORMATS) if sizes is None else list(sizes)

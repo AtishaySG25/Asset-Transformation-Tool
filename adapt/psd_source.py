@@ -17,7 +17,7 @@ import os
 import numpy as np
 from PIL import Image
 
-from .elements import Element, classify
+from .elements import Element, assign_uids, classify
 from . import log, saliency
 
 # Longest side kept for layout work. Comfortably above the largest output
@@ -258,7 +258,8 @@ def load_psd(path: str, max_dim: int | None = None) -> Source:
         log.log("no background layer found — using the flattened composite", 1)
         background = composite.copy()
 
-    src = Source(composite.width, composite.height, background, elements, composite)
+    src = Source(composite.width, composite.height, background,
+                 assign_uids(elements), composite)
     log.log(f"extracted {len(elements)} elements: "
             f"{', '.join(e.role for e in elements) or 'none'}", 1)
     log.log(f"pixels held: {log.mb(composite) + log.mb(background) + sum(log.mb(e.image) for e in elements):.0f}MB", 1)
@@ -281,7 +282,8 @@ def load_flat(path: str, max_dim: int | None = None) -> Source:
         crop = img.crop((l, t, r, b)).convert("RGBA")
         elements.append(Element(role="object", name=f"object_{i}",
                                 image=crop, bbox=(l, t, r, b)))
-    return to_working_size(Source(W, H, img.copy(), elements, img), max_dim)
+    return to_working_size(
+        Source(W, H, img.copy(), assign_uids(elements), img), max_dim)
 
 
 def load(path: str, max_dim: int | None = None) -> Source:

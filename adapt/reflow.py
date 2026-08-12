@@ -102,7 +102,7 @@ def plan_tall(source, tw: int, th: int) -> LayoutPlan:
             el = d["el"]
             plan.add(Placement(id=_el_id(d["idx"], el), kind="element", x=x, y=y,
                                w=tile.width, h=tile.height, element=d["idx"],
-                               name=el.name, role=el.role,
+                               uid=el.uid, name=el.name, role=el.role,
                                lock_aspect=d["params"]["mode"] == "stretch",
                                params=d["params"], tile=tile))
         y += tile.height + gap + extra
@@ -121,12 +121,17 @@ def _footer_text(source):
     return None, None
 
 
-def _footer_bar(source):
+def _footer_bar(source, skip=None):
     """A wide logo lock-up sitting at the bottom of the master — rendered as a
     full-width footer band (matches the skyscraper), not a small corner element.
-    Detected by shape+position, so it generalises."""
+    Detected by shape+position, so it generalises.
+
+    ``skip`` is the element already taken as the footer *text*: both tests are
+    satisfied by one wide bottom layer classified as a logo, and an element used
+    twice is drawn twice, under one id, which the editor then cannot tell apart.
+    """
     for idx, el in _indexed(source):
-        if (el.role == "logo" and el.width / max(1, el.height) > 4
+        if (idx != skip and el.role == "logo" and el.width / max(1, el.height) > 4
                 and el.cy > 0.70 * source.height):
             return idx, el
     return None, None
@@ -217,7 +222,7 @@ def plan_wide(source, tw: int, th: int) -> LayoutPlan:
     #    full-width disclaimer strip beneath it.
     f_idx, footer = _footer_text(source)
     strip_h = max(10, round(0.18 * th)) if footer is not None else 0
-    b_idx, bar_el = _footer_bar(source)
+    b_idx, bar_el = _footer_bar(source, skip=f_idx)
     bar_h = max(10, round(0.16 * th)) if bar_el is not None else 0
     region_h = th - strip_h - bar_h
     ch = round(0.86 * region_h)                  # column height (breathing room)
@@ -263,7 +268,7 @@ def plan_wide(source, tw: int, th: int) -> LayoutPlan:
             plan.add(Placement(id=_el_id(idx, el), kind="element",
                                x=x + (w - tile.width) / 2, y=y,
                                w=tile.width, h=tile.height, element=idx,
-                               name=el.name, role=el.role,
+                               uid=el.uid, name=el.name, role=el.role,
                                lock_aspect=spec["params"]["mode"] == "stretch",
                                params=spec["params"], tile=tile))
             y += tile.height + vgap
@@ -280,7 +285,7 @@ def plan_wide(source, tw: int, th: int) -> LayoutPlan:
         plan.add(Placement(id=_el_id(b_idx, bar_el), kind="element",
                            x=tw - mx - logo.width, y=by + (bar_h - logo.height) / 2,
                            w=logo.width, h=logo.height, element=b_idx,
-                           name=bar_el.name, role=bar_el.role,
+                           uid=bar_el.uid, name=bar_el.name, role=bar_el.role,
                            params={"mode": "stretch"}, tile=logo))
 
     # 6. Disclaimer on a solid light strip along the very bottom.
@@ -294,7 +299,8 @@ def plan_wide(source, tw: int, th: int) -> LayoutPlan:
                            x=(tw - tile.width) / 2,
                            y=th - strip_h + (strip_h - tile.height) / 2,
                            w=tile.width, h=tile.height, element=f_idx,
-                           name=footer.name, role=footer.role, lock_aspect=False,
+                           uid=footer.uid, name=footer.name,
+                           role=footer.role, lock_aspect=False,
                            params=spec["params"], tile=tile))
     return plan
 

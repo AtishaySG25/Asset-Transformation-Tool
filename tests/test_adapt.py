@@ -584,6 +584,139 @@ def test_base_image_defaults_to_the_old_stretch(source):
     assert not np.array_equal(before, np.array(render(plan, source)))
 
 
+# ------------------------------------------------- element identity / rebind --
+def _fake_source(*names):
+    """A Source-shaped stand-in: only `elements` matters to identity matching."""
+    from adapt.elements import Element, assign_uids
+    els = [Element(role="object", name=n, image=Image.new("RGBA", (4, 4)),
+                   bbox=(0, 0, 4, 4)) for n in names]
+    return type("S", (), {"elements": assign_uids(els)})()
+
+
+def _box(pid, element, name, role="object", uid=""):
+    from adapt.layout import Placement
+    return Placement(id=pid, kind="element", element=element, uid=uid,
+                     name=name, role=role)
+
+
+def test_uids_are_unique_even_when_layer_names_repeat():
+    src = _fake_source("BG", "Vector Smart Object", "Text", "Vector Smart Object")
+    uids = [el.uid for el in src.elements]
+    assert len(set(uids)) == len(uids)
+    assert uids == ["BG", "Vector Smart Object", "Text", "Vector Smart Object#2"]
+
+
+def test_rebind_relabels_a_plan_saved_under_an_older_extraction():
+    """The reported bug: one layer reading as "Group 7 (object)" in 728x90 and
+    "Footer (disclaimer)" in 970x90, because the two plans were saved either side
+    of a change to the extraction. Every plan is reconciled with the source on
+    load, so a layer is named the same way at every size."""
+    from adapt.layout import LayoutPlan, Placement, rebind
+    src = _fake_source("BG", "Text", "Group 7", "Footer")   # what is loaded now
+
+    # Saved when "BG" was consumed as the background, so everything shifted down
+    # one and the roles came out of a since-reverted inference pass.
+    stale = LayoutPlan(970, 90)
+    stale.add(_box("el0-headline", 0, "Text", "headline"))
+    stale.add(_box("el1-object", 1, "Group 7", "object"))
+    stale.add(_box("el2-disclaimer", 2, "Footer", "disclaimer"))
+
+    assert rebind(stale, src) == []
+    got = {p.uid: (p.element, p.name, p.role) for p in stale.placements}
+    assert got == {"Text": (1, "Text", "object"),
+                   "Group 7": (2, "Group 7", "object"),
+                   "Footer": (3, "Footer", "object")}
+    # The index is what the editor draws a plain element from, so it has to be
+    # the element the box claims — not merely resolvable to it.
+    for p in stale.placements:
+        assert src.elements[p.element].uid == p.uid
+
+
+def test_rebind_keeps_repeated_names_apart():
+    # Five layers share a name; matching each box independently would land all
+    # five on the first of them, silently drawing one picture five times.
+    from adapt.layout import LayoutPlan, rebind
+    vso = "Vector Smart Object"
+    src = _fake_source("BG", vso, "Text", vso, vso)
+    stale = LayoutPlan(970, 90)                 # saved before "BG" was extracted
+    for i, n in enumerate([vso, "Text", vso, vso]):
+        stale.add(_box(f"el{i}-object", i, n))
+
+    assert rebind(stale, src) == []
+    assert [p.element for p in stale.placements] == [1, 2, 3, 4]
+    assert [p.uid for p in stale.placements] == [vso, "Text", f"{vso}#2", f"{vso}#3"]
+
+
+def test_rebind_reports_an_element_that_is_gone_and_dedupes_ids():
+    from adapt.layout import LayoutPlan, rebind
+    src = _fake_source("Logo", "Text")
+    plan = LayoutPlan(970, 90)
+    plan.add(_box("el0-logo", 0, "Logo"))
+    plan.add(_box("el0-logo", 0, "Logo"))       # same element placed twice
+    plan.add(_box("el7-cta", 7, "Buy now", "cta"))
+
+    lost = rebind(plan, src)
+    assert [p.name for p in lost] == ["Buy now"]
+    ids = [p.id for p in plan.placements]
+    assert len(set(ids)) == len(ids), ids       # the editor addresses boxes by id
+    assert plan.placements[0].element == plan.placements[1].element == 0
+
+
+def test_saved_layouts_name_every_layer_the_same_way(source, tmp_path):
+    """End to end through the web API: open a master with plans saved under a
+    different extraction, and no layer may answer to two names or roles."""
+    from adapt import store
+    from adapt.web import create_app
+    from adapt.layout import LayoutPlan
+
+    c = create_app("input", str(tmp_path)).test_client()
+    assert c.post("/api/open", json={"path": INPUT}).status_code == 200
+    plans = {f: LayoutPlan.from_json(c.get(f"/api/plan/{f}").get_json()["plan"])
+             for f in ("970x90", "728x90", "160x600")}
+
+    # Age them the way a change to the extraction does: the names are the PSD's
+    # and stay put, but the indices shift and the roles come from whatever
+    # classification was in force. Only some formats are aged, which is what
+    # made one layer answer to two names in the first place.
+    stale = {"logo": "footer", "disclaimer": "rating", "headline": "scheme"}
+    for name, plan in plans.items():
+        if name == "160x600":
+            continue                                # saved after the change
+        for p in plan.placements:
+            if p.kind == "element":
+                p.uid = ""
+                p.element = (p.element or 0) + 3
+                p.role = stale.get(p.role, p.role)
+    store.save(INPUT, plans, out_dir=str(tmp_path))
+
+    c = create_app("input", str(tmp_path)).test_client()
+    assert c.post("/api/open", json={"path": INPUT}).status_code == 200
+    live = {e["uid"]: (e["name"], e["role"])
+            for e in c.get("/api/manifest").get_json()["elements"]}
+    seen = {}
+    for f in plans:
+        for p in c.get(f"/api/plan/{f}").get_json()["plan"]["placements"]:
+            if p["kind"] != "element":
+                continue
+            assert live[p["uid"]] == (p["name"], p["role"]), f"{f}/{p['id']}"
+            seen.setdefault(p["uid"], set()).add((p["name"], p["role"]))
+    assert seen, "no element placements to check"
+    for uid, labels in seen.items():
+        assert len(labels) == 1, f"{uid} reads as {labels} depending on the size"
+
+
+def test_one_element_is_never_placed_twice_by_the_wide_layout(source):
+    # A wide bottom text line classified as a logo satisfies both footer tests;
+    # placing it as the bar *and* the strip gave two boxes one id.
+    from adapt.reflow import plan_wide
+    for tw, th in ((970, 90), (728, 90), (468, 60)):
+        plan = plan_wide(source, tw, th)
+        used = [p.element for p in plan.placements if p.kind == "element"]
+        assert len(set(used)) == len(used), f"{tw}x{th} places an element twice"
+        ids = [p.id for p in plan.placements]
+        assert len(set(ids)) == len(ids), f"{tw}x{th} has duplicate ids"
+
+
 def test_detect_objects_flat_fallback():
     # A synthetic image with two bright blobs -> at least one contour box.
     img = np.zeros((400, 400, 3), np.uint8)

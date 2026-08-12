@@ -61,6 +61,7 @@ function tileURL(p) {
   const q = new URLSearchParams({
     kind: p.kind,
     element: p.element ?? "",
+    uid: p.uid || "",
     name: p.name || "",
     w: Math.max(1, Math.round(p.w)),
     h: Math.max(1, Math.round(p.h)),

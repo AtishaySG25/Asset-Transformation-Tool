@@ -239,6 +239,51 @@ rather than the URL it requested, with the HTTP cache left on — the same test
 run against the pre-fix build fails 6 of 8 checks, with the master hash
 identical across the switch.
 
+## 10. One layer, one name, at every size
+
+Reported: a layer called "Group 7 (object)" in `728x90` appears as "Footer
+(disclaimer)" in `970x90`, and the same for many other elements and layouts.
+
+A saved plan said which element each box drew by **index, name and role** — and
+all three are properties of the *extraction*, not of the PSD. Indices shift when
+a layer is consumed as the background or a group is split in two; roles change
+whenever `classify` does (the `e425bd2` role-inference work, and its revert in
+`8477418`, did both). Nothing reconciled a loaded plan with the source, and plans
+are stored **per format**, so each size kept whatever was true when *it* was last
+saved. `output/layouts/1_Signup Not Completed.json` held exactly that: `728x90`
+and `160x600` written after the revert, `970x90` and `468x60` before it.
+
+The labels were the visible half. `common.js` draws a plain element straight from
+`/api/element/<index>.png`, so in `970x90` every box was also showing the wrong
+artwork — the box labelled "Footer (disclaimer)" drew *Group 7*, "Text
+(headline)" drew *BG*, and so on for all six.
+
+- **`Element.uid`** (`elements.assign_uids`) — the layer name, with repeats
+  numbered in document order (`Vector Smart Object#2`). The name is the only
+  handle the designer controls, but names repeat: that PSD has five layers
+  sharing one. Placements carry it and it round-trips through the plan JSON.
+- **`layout.rebind(plan, source)`** — run wherever a stored plan enters the
+  system (`web.Session` on open and on save, `pipeline.run --use-layout`). Every
+  box is matched to an element and *relabelled from it*, so a name or a role has
+  exactly one source. It matches the plan as a whole, not a box at a time: uid
+  hits first, then a recorded index whose element still agrees by an unambiguous
+  name, then the remainder shared out in order against the same-named layers left
+  — which is what keeps those five "Vector Smart Object" boxes apart instead of
+  collapsing them onto the first one. Boxes whose layer is genuinely gone are
+  returned and logged rather than silently drawing a stranger.
+- **`layout.reissue_ids`** — ids encode index+role, both of which rebinding can
+  change, and `plan_wide` could give two boxes the same id by placing one element
+  as both the footer bar and the disclaimer strip (`_footer_bar` now skips the
+  element already taken as the footer text). The editor keys selection, deletion,
+  restacking and backdrop pairing on the id, so duplicates edited two boxes as
+  one; ids are now reissued unique, carrying `bg-<id>` backdrops with them.
+
+Verified against the real saved layouts for both affected masters: every layer
+now reports one name and one role across all sizes, every box's index resolves to
+the layer it claims, and no plan holds a duplicate id. All six algorithmic renders
+are byte-identical before and after for all three masters, as are the
+`--use-layout` renders — the identity is repaired without moving anyone's pixels.
+
 ## New CLI flags
 
 ```
@@ -260,7 +305,7 @@ adapt/web/templates/{editor.html,gallery.html}
 
 ## Testing
 
-33 pytest cases (up from 8 on `main`), covering: everything on `main`
+39 pytest cases (up from 8 on `main`), covering: everything on `main`
 (routing, role extraction, importance map, exact dimensions, text reflow,
 flat-image fallback) plus — plan JSON round-trips render byte-identically;
 re-wrapped text reproduces its own recorded wrap exactly; manual edits
@@ -279,7 +324,12 @@ imagery covers; `contain` fits the whole image; framing survives a plan
 round-trip to the renderer; `base_image` still defaults to the old stretch;
 and both downloads arrive as attachments carrying the *edited* layout;
 and opening a second master mints a fresh token that reaches every cached
-image URL, so switching assets cannot show the previous one's pictures.
+image URL, so switching assets cannot show the previous one's pictures; and
+element uids stay unique when layer names repeat, a plan saved under an older
+extraction is relabelled to the master now loaded, repeated names are kept apart
+instead of collapsing onto the first, a vanished layer is reported rather than
+silently redirected, ids are de-duplicated, and no size names a layer differently
+from any other size.
 
 Also manually verified end-to-end in a real Chromium browser (Playwright,
 throwaway venv, not the project's own): drag, handle-resize with genuine

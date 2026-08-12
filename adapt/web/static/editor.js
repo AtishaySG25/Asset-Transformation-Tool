@@ -829,7 +829,7 @@ function toggleBackdrop(p) {
     for (const q of plan.placements) if (q.z >= at) q.z += 1;
     plan.placements.push({
       id, kind: "photo_band", x: p.x, y: p.y, w: p.w, h: p.h, z: at,
-      element: null, name: "", role: "", visible: true, lock_aspect: false,
+      element: null, uid: "", name: "", role: "", visible: true, lock_aspect: false,
       opacity: 1, params: { feather: 0, focus_x: 0.5 },
     });
   }

@@ -56,6 +56,7 @@ class Element:
     image: Image.Image           # tight-cropped RGBA
     bbox: tuple[int, int, int, int]  # (l, t, r, b) on the source canvas
     is_type: bool = False        # backed by a PSD type layer (candidate for reflow)
+    uid: str = ""                # stable identity — see `assign_uids`
 
     @property
     def priority(self) -> int:
@@ -76,3 +77,22 @@ class Element:
     @property
     def cy(self) -> float:
         return (self.bbox[1] + self.bbox[3]) / 2
+
+
+def assign_uids(elements: list[Element]) -> list[Element]:
+    """Give every element an identity that survives being re-extracted.
+
+    A saved layout has to say *which* element each of its boxes draws, and the
+    obvious handles are all properties of the extraction rather than of the PSD:
+    the index shifts whenever a layer is consumed as the background or split in
+    two, and the role changes whenever :func:`classify` does. The layer name is
+    the one thing the designer controls — but names repeat (a PSD can hold five
+    layers called "Vector Smart Object"), so the name alone identifies a group,
+    not a layer. Numbering the repeats in document order makes it unique without
+    making it volatile.
+    """
+    seen: dict[str, int] = {}
+    for el in elements:
+        n = seen[el.name] = seen.get(el.name, 0) + 1
+        el.uid = el.name if n == 1 else f"{el.name}#{n}"
+    return elements

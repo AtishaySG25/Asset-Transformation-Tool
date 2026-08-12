@@ -47,7 +47,7 @@ from flask import (Flask, abort, jsonify, render_template, request,
 from .. import formats as formats_mod
 from .. import log, saliency, store
 from ..formats import FORMATS, Format
-from ..layout import LayoutPlan, Placement
+from ..layout import LayoutPlan, Placement, rebind
 from ..pipeline import (_bgr, effective_strategy, plan_explode, plan_for_format,
                         plan_raw, render as render_image, review)
 from ..psd_source import load
@@ -68,6 +68,8 @@ class Session:
                                                       self.source.elements)
             s["note"] = f"{self.importance.shape[1]}x{self.importance.shape[0]}"
         self.saved = store.load(path, out_dir)          # hand-edited, from disk
+        for name, plan in self.saved.items():
+            self._rebind(name, plan)
         self.custom = store.load_custom(path, out_dir)  # user-added target sizes
         self.auto: dict[str, LayoutPlan] = {}           # algorithmic, memoised
         self.rev = int(time.time())                     # cache-buster for renders
@@ -141,8 +143,19 @@ class Session:
     def plan(self, name: str) -> LayoutPlan:
         return self.saved.get(name) or self.auto_plan(name)
 
+    def _rebind(self, name: str, plan: LayoutPlan) -> LayoutPlan:
+        """Reconcile a plan's element references with the master now loaded, so
+        every format names the same layer the same way (see
+        :func:`adapt.layout.rebind`)."""
+        lost = rebind(plan, self.source)
+        if lost:
+            log.log(f"{name}: {len(lost)} placement(s) refer to elements that are "
+                    f"no longer in the master and will not draw: "
+                    f"{', '.join(sorted({p.uid or p.name or p.id for p in lost}))}", 1)
+        return plan
+
     def set_plan(self, name: str, plan: LayoutPlan):
-        self.saved[name] = plan
+        self.saved[name] = self._rebind(name, plan)
         self.rev += 1
         self._persist()
         log.log(f"saved manual layout for {name} ({len(plan.placements)} placements)")
@@ -164,7 +177,7 @@ class Session:
             "name": os.path.basename(self.path),
             "width": src.width, "height": src.height,
             "elements": [
-                {"index": i, "name": el.name, "role": el.role,
+                {"index": i, "uid": el.uid, "name": el.name, "role": el.role,
                  "is_type": bool(el.is_type), "bbox": list(el.bbox),
                  "w": el.width, "h": el.height,
                  "url": url_for("element_png", index=i, v=self.token)}
@@ -314,6 +327,7 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
                       w=float(request.args.get("w", 1)),
                       h=float(request.args.get("h", 1)),
                       element=int(el) if el not in (None, "", "null") else None,
+                      uid=request.args.get("uid", ""),
                       name=request.args.get("name", ""), params=params)
         tile = placement_tile(p, s.source, int(request.args.get("ss", 2)))
         if tile is None:
