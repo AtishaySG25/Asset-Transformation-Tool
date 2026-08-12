@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>adapt — {{ fmt }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body data-fmt="{{ fmt }}">
+  <header>
+    <a href="/">&larr; all sizes</a>
+    <span id="tabs"></span>
+    <span class="badge" id="strategy"></span>
+    <span class="badge edited" id="editedBadge" hidden>edited</span>
+    <button id="undo" title="Undo (Ctrl+Z)" disabled>&#8630;</button>
+    <button id="redo" title="Redo (Ctrl+Y)" disabled>&#8631;</button>
+    <span class="spacer"></span>
+    <label class="asset">canvas</label>
+    <input id="cw" type="number" min="16" max="8000" step="1" title="canvas width">
+    <span class="asset">&times;</span>
+    <input id="ch" type="number" min="16" max="8000" step="1" title="canvas height">
+    <button id="resize" title="Rescale the whole layout to a new size">Resize</button>
+    <label class="asset">zoom</label>
+    <input id="zoom" type="range" min="0.5" max="8" step="0.5" value="1">
+    <span class="asset" id="zoomLabel">100%</span>
+    <button id="explode" hidden title="Break the flat composite into per-element boxes">Explode elements</button>
+    <button id="reset">Reset to algorithm</button>
+    <button id="compare">Show render</button>
+    <button id="save" class="primary">Save</button>
+    <button id="export">Export PNG</button>
+  </header>
+
+  <div class="workspace">
+    <div class="panel">
+      <h2>Layers <span class="asset" style="text-transform:none">(top first)</span></h2>
+      <div id="layers"></div>
+      <div class="hint">Drag a row to change stacking. Click the eye to hide.</div>
+    </div>
+
+    <div class="stage-wrap" id="stageWrap">
+      <div class="warnbox" id="warnings" hidden></div>
+      <div class="stage" id="stage"></div>
+      <div class="compare" id="compareBox" hidden>
+        <div class="cap">server render — this is exactly what Export writes</div>
+        <img id="compareImg" alt="render">
+      </div>
+    </div>
+
+    <div class="panel right">
+      <h2>Master
+        <button class="mini" id="masterToggle" title="show / hide the original">hide</button>
+      </h2>
+      <div id="masterBox">
+        <a id="masterLink" href="/api/master.png" target="_blank"
+           title="open the full-size render in a new tab">
+          <img class="master-img" id="master" alt="the master asset">
+        </a>
+        <div class="hint" id="masterCap"></div>
+      </div>
+
+      <div class="divider"></div>
+      <h2>Properties</h2>
+      <div id="props"><div class="hint">Select an element on the canvas.</div></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="{{ url_for('static', filename='common.js') }}"></script>
+  <script src="{{ url_for('static', filename='editor.js') }}"></script>
+</body>
+</html>

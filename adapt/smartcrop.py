@@ -44,9 +44,8 @@ def _best_window(importance: np.ndarray, target_aspect: float):
         return (best, 0, best + cw, H)
 
 
-def content_aware_crop(composite: Image.Image, importance: np.ndarray,
-                       tw: int, th: int) -> Image.Image:
-    """Crop ``composite`` to the best target-aspect window, resize to (tw, th).
+def crop_box(importance: np.ndarray, tw: int, th: int):
+    """The (l, t, r, b) window to keep for a (tw, th) target.
 
     When height is trimmed, a gentle top-favouring prior biases the window to keep
     the top of the ad (headline/branding) rather than slicing it off.
@@ -57,8 +56,13 @@ def content_aware_crop(composite: Image.Image, importance: np.ndarray,
         H = imp.shape[0]
         prior = np.linspace(1.9, 0.4, H, dtype=np.float32)[:, None]
         imp = imp * prior
-    l, t, r, b = _best_window(imp, tw / th)
-    return composite.crop((l, t, r, b)).resize((tw, th), Image.LANCZOS)
+    return _best_window(imp, tw / th)
+
+
+def content_aware_crop(composite: Image.Image, importance: np.ndarray,
+                       tw: int, th: int) -> Image.Image:
+    """Crop ``composite`` to the best target-aspect window, resize to (tw, th)."""
+    return composite.crop(crop_box(importance, tw, th)).resize((tw, th), Image.LANCZOS)
 
 
 def fit_all(composite: Image.Image, tw: int, th: int) -> Image.Image:

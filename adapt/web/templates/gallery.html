@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>adapt — layout editor</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header>
+    <h1>adapt</h1>
+    <select id="sources"></select>
+    <button id="open">Open</button>
+    <label class="badge" style="cursor:pointer">
+      upload<input id="upload" type="file" accept=".psd,.png,.jpg,.jpeg" hidden>
+    </label>
+    <span class="spacer"></span>
+    <span class="asset" id="asset"></span>
+    <button id="scale" title="Preview at actual pixel size, or scaled to fit">1:1</button>
+    <span class="sizeform">
+      <label class="asset">add size</label>
+      <input id="nw" type="number" min="16" max="8000" placeholder="w">
+      <span class="asset">&times;</span>
+      <input id="nh" type="number" min="16" max="8000" placeholder="h">
+      <button id="addSize">Add</button>
+    </span>
+    <button id="zip" title="Download every size as one archive">Download all (.zip)</button>
+    <button id="export">Export all to output/</button>
+  </header>
+
+  <div class="gallery-wrap">
+    <div class="gallery-cols" id="gallery">
+      <div class="empty">Pick a master asset and press <b>Open</b>.</div>
+    </div>
+
+    <aside class="panel right">
+      <h2>Master
+        <button class="mini" id="masterToggle" title="show / hide the original">hide</button>
+      </h2>
+      <div id="masterBox">
+        <a id="masterLink" href="/api/master.png" target="_blank"
+           title="open the full-size render in a new tab">
+          <img class="master-img" id="master" alt="the master asset">
+        </a>
+        <div class="hint" id="masterCap"></div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="{{ url_for('static', filename='common.js') }}"></script>
+  <script src="{{ url_for('static', filename='gallery.js') }}"></script>
+</body>
+</html>

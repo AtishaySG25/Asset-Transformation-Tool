@@ -20,3 +20,6 @@ output/
 Thumbs.db
 .vscode/
 .idea/
+
+# Session notes / scratch context, not part of the project
+context.md

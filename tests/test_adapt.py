@@ -3,11 +3,12 @@
 Tests that need the layered master are skipped when it is absent (it is a large
 binary kept out of the repo); the pure-CV and routing tests always run.
 """
+import io
 import os
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from adapt.formats import FORMATS, Format, strategy_for
 from adapt import smartcrop, saliency, textflow
@@ -125,6 +126,595 @@ def test_structured_source_does_not_take_photo_path():
 
     assert effective_strategy(src, Format(200, 200)) == "crop"
     assert effective_strategy(src, Format(970, 90)) == "reflow"
+
+
+def test_plan_json_roundtrip_renders_identically(source):
+    # A plan is the contract between the layout engine, the editor and the
+    # exporter: sending it through JSON must not change a single pixel.
+    from adapt.layout import LayoutPlan
+    from adapt.pipeline import plan_for_format, render
+    from adapt import saliency as sal
+
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+    for fmt in FORMATS:
+        plan = plan_for_format(source, fmt, imp)
+        direct = render(plan, source)
+        revived = render(LayoutPlan.from_json(plan.to_json()), source)
+        assert revived.size == (fmt.width, fmt.height)
+        assert np.array_equal(np.array(direct), np.array(revived)), fmt.name
+
+
+def test_text_boxes_reproduce_their_own_wrap(source):
+    # Every re-wrapped text placement must re-render to exactly the box the plan
+    # recorded — otherwise a saved layout would drift each time it is opened.
+    from adapt.pipeline import plan_for_format
+    from adapt import tiles
+    from adapt.layout import resolve_element
+    from adapt import saliency as sal
+
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+    checked = 0
+    for fmt in FORMATS:
+        for p in plan_for_format(source, fmt, imp).placements:
+            if p.params.get("mode") != "reflow":
+                continue
+            el = resolve_element(source, p)
+            tile = tiles.text_tile(el, round(p.w), p.params["line_h"],
+                                   align=p.params.get("align", "left"))
+            assert (tile.width, tile.height) == (round(p.w), round(p.h)), \
+                f"{fmt.name}/{p.id}: {tile.size} != {(round(p.w), round(p.h))}"
+            checked += 1
+    assert checked, "no re-wrapped text found to check"
+
+
+def test_manual_edits_survive_a_save_and_reload(source, tmp_path):
+    # The editor's persistence path: move something, save, reload, re-render.
+    from adapt import store
+    from adapt.pipeline import plan_for_format, render
+    from adapt import saliency as sal
+
+    fmt = FORMATS[0]
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+    plan = plan_for_format(source, fmt, imp)
+    moved = next(p for p in plan.placements if p.kind == "element")
+    moved.x, moved.y = 7, 3
+    store.save("input/Axis.psd", {fmt.name: plan}, out_dir=str(tmp_path))
+
+    back = store.load("input/Axis.psd", str(tmp_path))[fmt.name]
+    p2 = back.by_id(moved.id)
+    assert (p2.x, p2.y) == (7, 3)
+    out = render(back, source)
+    assert out.size == (fmt.width, fmt.height)
+
+
+def test_switching_assets_invalidates_cached_images(tmp_path):
+    """Opening a second master must not redraw it with the first one's pictures.
+
+    /api/element, /api/tile and /api/master are served ``max-age=3600`` and their
+    URLs are otherwise identical for every asset, so without a per-source token
+    the browser never re-requests them: the caption updates (JSON is uncached)
+    while the image does not.
+    """
+    from adapt.web import create_app
+    others = [p for p in (os.path.join("input", f) for f in sorted(os.listdir("input")))
+              if p.lower().endswith((".psd", ".png", ".jpg", ".jpeg"))
+              and os.path.abspath(p) != os.path.abspath(INPUT)]
+    if not os.path.exists(INPUT) or not others:
+        pytest.skip("needs two master assets in input/")
+
+    c = create_app("input", str(tmp_path)).test_client()
+    seen, masters = [], []
+    for path in (INPUT, others[0], INPUT):
+        assert c.post("/api/open", json={"path": path}).status_code == 200
+        man = c.get("/api/manifest").get_json()
+        seen.append(man["token"])
+        masters.append(c.get("/api/master.png?w=320").data)
+        # the token has to reach the URLs the browser actually caches on
+        assert all(f"v={man['token']}" in e["url"] for e in man["elements"])
+
+    assert len(set(seen)) == 3, "each open needs its own token, even re-opens"
+    assert masters[0] != masters[1], "different assets must render differently"
+    assert masters[0] == masters[2], "same asset must render the same"
+    # long caching is the point — the token is what makes it safe
+    assert "max-age=3600" in c.get("/api/master.png").headers["Cache-Control"]
+
+
+def test_web_api_round_trip(source, tmp_path):
+    # Smoke-test the editor's own contract end to end through Flask.
+    from adapt.web import create_app
+    app = create_app("input", str(tmp_path))
+    c = app.test_client()
+
+    assert c.get("/api/plan/970x90").status_code == 409      # nothing open yet
+    assert c.post("/api/open", json={"path": INPUT}).status_code == 200
+
+    man = c.get("/api/manifest").get_json()
+    assert len(man["formats"]) == len(FORMATS)
+    assert man["elements"] and all("role" in e for e in man["elements"])
+
+    body = c.get("/api/plan/970x90").get_json()
+    plan = body["plan"]
+    assert body["edited"] is False and plan["placements"]
+
+    # a tile for the first element renders
+    assert c.get(f"/api/element/{man['elements'][0]['index']}.png").status_code == 200
+
+    # the master asset is served rasterised, full size and scaled for the sidebar
+    with Image.open(io.BytesIO(c.get("/api/master.png").data)) as im:
+        assert im.size == (man["width"], man["height"])
+    with Image.open(io.BytesIO(c.get("/api/master.png?w=320").data)) as im:
+        assert im.width == 320
+
+    # posting the untouched plan back reproduces the stored render byte for byte
+    a = c.get("/api/render/970x90.png").data
+    b = c.post("/api/render/970x90.png", json=plan).data
+    assert a == b
+
+    # edit -> save -> persisted -> reset
+    plan["placements"][1]["x"] = 123
+    assert c.put("/api/plan/970x90", json=plan).get_json()["edited"] is True
+    assert os.path.exists(tmp_path / "layouts" / "Axis.json")
+    assert c.get("/api/plan/970x90").get_json()["plan"]["placements"][1]["x"] == 123
+    assert c.post("/api/plan/970x90/reset").get_json()["edited"] is False
+
+    # a near-square format can be broken into per-element boxes on demand
+    ex = c.post("/api/plan/300x250/explode").get_json()["plan"]
+    assert ex["strategy"] == "explode"
+    assert len(ex["placements"]) == len(man["elements"]) + 1
+
+    with Image.open(io.BytesIO(c.get("/api/render/300x250.png").data)) as im:
+        assert im.size == (300, 250)
+
+
+def test_downloads_are_plain_attachments(source, tmp_path):
+    # The browser has to be able to fetch these itself — no JS assembling a blob
+    # — so each must arrive as a normal attachment with a filename.
+    import zipfile
+    from adapt.web import create_app
+    c = create_app("input", str(tmp_path)).test_client()
+    assert c.post("/api/open", json={"path": INPUT}).status_code == 200
+
+    r = c.get("/api/render/970x90.png?download=1")
+    assert r.status_code == 200
+    assert "attachment" in r.headers["Content-Disposition"]
+    assert "970x90.png" in r.headers["Content-Disposition"]
+    # ...and it is the same image the gallery previews, not a second render.
+    assert r.data == c.get("/api/render/970x90.png").data
+
+    z = c.get("/api/download.zip")
+    assert z.status_code == 200
+    assert "attachment" in z.headers["Content-Disposition"]
+    with zipfile.ZipFile(io.BytesIO(z.data)) as zf:
+        assert sorted(zf.namelist()) == sorted(f"{f.name}.png" for f in FORMATS)
+        with Image.open(io.BytesIO(zf.read("160x600.png"))) as im:
+            assert im.size == (160, 600)
+
+    # A hand-edited layout is what gets downloaded, not the algorithmic one.
+    plan = c.get("/api/plan/160x600").get_json()["plan"]
+    band = next(p for p in plan["placements"] if p["kind"] == "photo_band")
+    band["params"].update(zoom=0.35, focus_x=0.15)
+    assert c.put("/api/plan/160x600", json=plan).status_code == 200
+    with zipfile.ZipFile(io.BytesIO(c.get("/api/download.zip").data)) as zf:
+        assert zf.read("160x600.png") == c.get("/api/render/160x600.png").data
+
+
+def test_justify_fills_the_column():
+    # Justified lines span the full column; the last line stays flush left.
+    from PIL import Image as Im, ImageDraw
+    strip = Im.new("RGBA", (600, 40), (0, 0, 0, 0))
+    d = ImageDraw.Draw(strip)
+    for i in range(6):
+        d.rectangle([i * 100 + 10, 8, i * 100 + 70, 32], fill=(200, 0, 80, 255))
+    left = textflow.reflow_to_width(strip, target_w=140, line_h=24, align="left")
+    just = textflow.reflow_to_width(strip, target_w=140, line_h=24, align="justify")
+    assert just.width == 140 >= left.width      # fills the column exactly
+    assert just.height == left.height           # same line breaks, same height
+
+
+def test_element_crop_is_fractional_and_exact(source):
+    from adapt import tiles
+    el = next(e for e in source.elements if not e.is_type)
+    full = tiles.graphic_tile(el, 200, 100)
+    half = tiles.graphic_tile(el, 200, 100, crop=[0.0, 0.0, 0.5, 1.0])
+    assert full.size == half.size == (200, 100)   # the box is unchanged...
+    assert np.array(full) .shape == np.array(half).shape
+    assert not np.array_equal(np.array(full), np.array(half))   # ...content is not
+    # A full-extent crop is a no-op.
+    assert np.array_equal(np.array(tiles.graphic_tile(el, 60, 60, crop=[0, 0, 1, 1])),
+                          np.array(tiles.graphic_tile(el, 60, 60)))
+
+
+def test_opacity_fades_towards_what_is_behind(source):
+    from adapt.pipeline import plan_for_format, render
+    from adapt import saliency as sal
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+    fmt = FORMATS[0]
+    plan = plan_for_format(source, fmt, imp)
+    solid = np.array(render(plan, source), dtype=np.int16)
+    for p in plan.placements:
+        if p.kind == "element":
+            p.opacity = 0.0
+    faded = np.array(render(plan, source), dtype=np.int16)
+    assert solid.shape == faded.shape
+    assert np.abs(solid - faded).mean() > 1.0     # elements really did fade out
+
+
+def test_custom_sizes_are_laid_out_and_reviewed(source):
+    # A custom size goes through the same engine; review() reports when it fails.
+    from adapt.formats import Format, validate
+    from adapt.pipeline import plan_for_format, plan_raw, render, review
+    from adapt import saliency as sal
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+
+    assert validate(10, 10) and validate(99999, 100)      # rejected, with a reason
+    assert validate(1000, 300) is None
+
+    ok = Format(1000, 300)
+    assert render(plan_for_format(source, ok, imp), source).size == (1000, 300)
+    assert review(plan_for_format(source, ok, imp), source) == []
+
+    harsh = Format(120, 40)
+    assert review(plan_for_format(source, harsh, imp), source), "should warn"
+
+    # The manual fallback still holds every element, at the exact size.
+    raw = plan_raw(source, harsh.width, harsh.height)
+    assert len([p for p in raw.placements if p.kind == "element"]) == len(source.elements)
+    assert render(raw, source).size == (120, 40)
+
+
+def test_no_standard_format_trips_a_warning(source):
+    # The thresholds must not cry wolf on the six sizes we ship.
+    from adapt.pipeline import plan_for_format, review
+    from adapt import saliency as sal
+    imp = sal.importance_map(np.array(source.composite)[:, :, ::-1].copy(),
+                             source.elements)
+    for fmt in FORMATS:
+        assert review(plan_for_format(source, fmt, imp), source) == [], fmt.name
+
+
+def test_custom_sizes_persist_and_reach_the_cli(source, tmp_path):
+    from adapt import store
+    from adapt.formats import Format
+    from adapt.pipeline import run
+    store.save(INPUT, {}, custom=[Format(1000, 300)], out_dir=str(tmp_path))
+    assert store.load_custom(INPUT, str(tmp_path)) == [Format(1000, 300)]
+    paths = run(INPUT, str(tmp_path), debug=False, use_saved=True)
+    assert any(p.endswith("1000x300.png") for p in paths)
+    with Image.open(tmp_path / "1000x300.png") as im:
+        assert im.size == (1000, 300)
+
+
+class _Node:
+    """Stands in for a psd_tools layer: composites a crop of a fixed image."""
+
+    def __init__(self, img, honour_viewport=True):
+        self.img = img
+        self.honour_viewport = honour_viewport
+
+    def composite(self, viewport=None):
+        if viewport is None or not self.honour_viewport:
+            return self.img
+        return self.img.crop(viewport)
+
+
+def _artwork(w, h):
+    """Smooth gradients plus hard shapes — representative of real artwork.
+
+    (Pure noise would be a pointless subject here: any sub-pixel difference in
+    the resampling grid changes every pixel, so it measures nothing useful.)
+    """
+    y, x = np.mgrid[0:h, 0:w]
+    a = np.stack([(x * 255 // max(1, w - 1)), (y * 255 // max(1, h - 1)),
+                  ((x + y) * 255 // max(1, w + h - 2))], -1).astype(np.uint8)
+    img = Image.fromarray(a, "RGB")
+    d = ImageDraw.Draw(img)
+    for i in range(6):
+        d.rectangle([w * i // 7, h // 4, w * i // 7 + w // 12, 3 * h // 4],
+                    fill=(240, 30, 90))
+    d.ellipse([w // 3, h // 3, 2 * w // 3, 2 * h // 3], outline=(0, 0, 0), width=5)
+    return img
+
+
+def test_banded_compositing_matches_one_pass():
+    # Bands exist to cap memory, so they must not change the picture. The overlap
+    # margin is what makes the seams disappear.
+    from adapt.psd_source import _composite_scaled
+    src = _artwork(600, 400)
+    node = _Node(src)
+    box, k = (0, 0, 600, 400), 0.25
+    one = _composite_scaled(node, box, k, "RGB", band=False)
+    many = _composite_scaled(node, box, k, "RGB", band=True, max_band_px=80_000)
+    assert one.size == many.size == (150, 100)
+
+    # Each band rounds its own target height, so content inside it can land up to
+    # half a pixel out — invisible on the photographic backdrop this is used for,
+    # and zero on the real master, where the boundaries divide evenly. What must
+    # never happen is tiling, which puts these numbers in the hundreds.
+    d = np.abs(np.asarray(one, float) - np.asarray(many, float))
+    assert d.mean() < 1.0, d.mean()
+    assert d.max(2).mean(1).max() < 40, d.max(2).mean(1).max()
+
+
+def test_banding_falls_back_when_the_viewport_is_ignored():
+    # PSDImage.composite() returns the embedded preview and ignores the viewport.
+    # Banding that would tile the whole image down the canvas, so it must detect
+    # the mismatch and composite in one pass instead.
+    from adapt.psd_source import _composite_scaled
+    src = _artwork(600, 400)
+    banded = _composite_scaled(_Node(src, honour_viewport=False), (0, 0, 600, 400),
+                               0.25, "RGB", band=True, max_band_px=20_000)
+    plain = _composite_scaled(_Node(src), (0, 0, 600, 400), 0.25, "RGB", band=False)
+    assert banded.size == (150, 100)
+    assert np.array_equal(np.asarray(banded), np.asarray(plain))
+
+
+def test_working_size_downscale_keeps_boxes_and_pixels_aligned():
+    from adapt.elements import Element
+    from adapt.psd_source import Source, to_working_size
+    canvas = _artwork(4000, 2000)
+    tile = Image.new("RGBA", (400, 200), (10, 20, 30, 255))
+    src = Source(4000, 2000, canvas, [Element(role="logo", name="l", image=tile,
+                                              bbox=(100, 50, 500, 250))], canvas)
+    to_working_size(src, max_dim=1000)
+    assert (src.width, src.height) == (1000, 500)
+    el = src.elements[0]
+    assert el.image.size == (100, 50)
+    # The box must still describe where those pixels are, at the new scale.
+    assert el.bbox == (25, 12, 125, 62)
+    assert (el.width, el.height) == el.image.size
+
+
+def test_importance_map_cap_does_not_change_the_crop(source):
+    # The map is downscaled for speed; the window it selects must not move.
+    bgr = np.array(source.composite.convert("RGB"))[:, :, ::-1].copy()
+    full = saliency.importance_map(bgr, source.elements, max_dim=99999)
+    capped = saliency.importance_map(bgr, source.elements)
+    assert capped.shape == full.shape
+    for fmt in FORMATS:
+        a = smartcrop.crop_box(full, fmt.width, fmt.height)
+        b = smartcrop.crop_box(capped, fmt.width, fmt.height)
+        assert all(abs(x - y) <= 2 for x, y in zip(a, b)), (fmt.name, a, b)
+
+
+# --------------------------------------------------- background framing --
+def _stripes(w, h):
+    """An image whose content differs everywhere, so any reframing is visible."""
+    a = np.zeros((h, w, 3), np.uint8)
+    a[:, :, 0] = np.linspace(0, 255, w, dtype=np.uint8)[None, :]
+    a[:, :, 1] = np.linspace(0, 255, h, dtype=np.uint8)[:, None]
+    a[::7, :, 2] = 255
+    return Image.fromarray(a)
+
+
+def test_zoom_one_is_the_old_cover_crop():
+    # The whole feature has to be inert at its default, or every saved layout
+    # and every algorithmic render would shift.
+    from adapt.background import fill_background
+    src = _stripes(1200, 1200)
+    for tw, th in [(160, 600), (970, 90), (300, 250), (200, 200)]:
+        for focus in [(0.5, 0.5), (0.2, 0.8), (0.0, 1.0)]:
+            base = fill_background(src, tw, th, focus=focus)
+            same = fill_background(src, tw, th, focus=focus, zoom=1.0)
+            assert base.size == same.size == (tw, th)
+            assert base.mode == "RGB"                 # covers, so no padding
+            assert np.array_equal(np.array(base), np.array(same))
+
+
+def test_zooming_out_shows_more_than_a_cover_crop_can():
+    # The reported problem: at 160x600 a cover crop of a square master can only
+    # ever show 160/600 of its width. Pulling back must reveal more.
+    from adapt.background import fill_background
+    src = _stripes(1200, 1200)
+    covered = fill_background(src, 160, 600, focus=(0.5, 0.5))
+    # Red increases left->right across the source, so the span of red values in
+    # the result measures how much of the source's width is visible.
+    span = lambda im: int(np.ptp(np.array(im.convert("RGB"))[:, :, 0].astype(int)))
+    wide = fill_background(src, 160, 600, focus=(0.5, 0.5), zoom=0.25)
+    assert wide.size == (160, 600)
+    assert span(wide) > span(covered) * 2, (span(wide), span(covered))
+    assert wide.mode == "RGBA"                        # cannot cover: padded
+    assert np.array(wide)[:, :, 3].min() == 0         # and the pad is transparent
+
+
+def test_focus_pans_without_moving_or_resizing_the_box():
+    from adapt.background import fill_background
+    src = _stripes(1200, 1200)
+    left = fill_background(src, 160, 600, focus=(0.15, 0.5))
+    right = fill_background(src, 160, 600, focus=(0.85, 0.5))
+    assert left.size == right.size == (160, 600)      # the frame never moves...
+    assert not np.array_equal(np.array(left), np.array(right))   # ...content does
+    # Red rises left->right in the source, so panning right must raise it here.
+    assert np.array(right)[:, :, 0].mean() > np.array(left)[:, :, 0].mean() + 20
+
+
+def test_focus_cannot_open_a_gap_while_the_imagery_covers():
+    # Panning to the extremes at zoom>=1 must still fill the box completely —
+    # the no-clipping/no-padding guarantee the renderer has always made.
+    from adapt.background import fill_background
+    src = _stripes(1200, 1200)
+    for f in [(0.0, 0.0), (1.0, 1.0), (-5.0, 5.0)]:
+        out = fill_background(src, 300, 250, focus=f, zoom=1.4)
+        assert out.mode == "RGB" and out.size == (300, 250)
+
+
+def test_contain_fits_the_whole_image_in_the_box():
+    from adapt import tiles
+    src = _stripes(1200, 600)
+    out = tiles.background_tile(src, 200, 200, fit="contain")
+    assert out.size == (200, 200)
+    a = np.array(out)
+    # 1200x600 into a square: full width, half the height, rest transparent.
+    opaque_rows = np.where(a[:, :, 3].max(axis=1) > 0)[0]
+    assert len(opaque_rows) == pytest.approx(100, abs=2)
+    assert a[:, :, 3].min() == 0
+
+
+def test_framed_background_renders_through_the_plan(source):
+    # The params have to survive a plan round-trip and reach the renderer, since
+    # that is the path both the editor and --use-layout take.
+    from adapt.layout import LayoutPlan, Placement
+    from adapt.pipeline import render
+    plan = LayoutPlan(160, 600, strategy="reflow-tall", base_color=(255, 255, 255))
+    plan.add(Placement(id="photo-band", kind="photo_band", x=0, y=0, w=160, h=600,
+                       lock_aspect=False,
+                       params={"feather": 0.0, "focus_x": 0.5, "focus_y": 0.5}))
+    plain = np.array(render(plan, source))
+
+    plan.placements[0].params.update(zoom=0.4, focus_x=0.2)
+    reframed = LayoutPlan.from_json(plan.to_json())
+    assert reframed.placements[0].params["zoom"] == 0.4
+    out = render(reframed, source)
+    assert out.size == (160, 600)                      # exact size still holds
+    assert not np.array_equal(plain, np.array(out))    # and it really reframed
+
+
+def test_base_image_defaults_to_the_old_stretch(source):
+    # plan_fit's near-square output must not change now base_image can be framed.
+    from adapt.pipeline import plan_fit, render
+    plan = plan_fit(source, 300, 250)
+    before = np.array(render(plan, source))
+    plan.placements[0].params["fit"] = "stretch"        # the implicit default
+    assert np.array_equal(before, np.array(render(plan, source)))
+    plan.placements[0].params.update(fit="cover", zoom=1.0)
+    assert not np.array_equal(before, np.array(render(plan, source)))
+
+
+# ------------------------------------------------- element identity / rebind --
+def _fake_source(*names):
+    """A Source-shaped stand-in: only `elements` matters to identity matching."""
+    from adapt.elements import Element, assign_uids
+    els = [Element(role="object", name=n, image=Image.new("RGBA", (4, 4)),
+                   bbox=(0, 0, 4, 4)) for n in names]
+    return type("S", (), {"elements": assign_uids(els)})()
+
+
+def _box(pid, element, name, role="object", uid=""):
+    from adapt.layout import Placement
+    return Placement(id=pid, kind="element", element=element, uid=uid,
+                     name=name, role=role)
+
+
+def test_uids_are_unique_even_when_layer_names_repeat():
+    src = _fake_source("BG", "Vector Smart Object", "Text", "Vector Smart Object")
+    uids = [el.uid for el in src.elements]
+    assert len(set(uids)) == len(uids)
+    assert uids == ["BG", "Vector Smart Object", "Text", "Vector Smart Object#2"]
+
+
+def test_rebind_relabels_a_plan_saved_under_an_older_extraction():
+    """The reported bug: one layer reading as "Group 7 (object)" in 728x90 and
+    "Footer (disclaimer)" in 970x90, because the two plans were saved either side
+    of a change to the extraction. Every plan is reconciled with the source on
+    load, so a layer is named the same way at every size."""
+    from adapt.layout import LayoutPlan, Placement, rebind
+    src = _fake_source("BG", "Text", "Group 7", "Footer")   # what is loaded now
+
+    # Saved when "BG" was consumed as the background, so everything shifted down
+    # one and the roles came out of a since-reverted inference pass.
+    stale = LayoutPlan(970, 90)
+    stale.add(_box("el0-headline", 0, "Text", "headline"))
+    stale.add(_box("el1-object", 1, "Group 7", "object"))
+    stale.add(_box("el2-disclaimer", 2, "Footer", "disclaimer"))
+
+    assert rebind(stale, src) == []
+    got = {p.uid: (p.element, p.name, p.role) for p in stale.placements}
+    assert got == {"Text": (1, "Text", "object"),
+                   "Group 7": (2, "Group 7", "object"),
+                   "Footer": (3, "Footer", "object")}
+    # The index is what the editor draws a plain element from, so it has to be
+    # the element the box claims — not merely resolvable to it.
+    for p in stale.placements:
+        assert src.elements[p.element].uid == p.uid
+
+
+def test_rebind_keeps_repeated_names_apart():
+    # Five layers share a name; matching each box independently would land all
+    # five on the first of them, silently drawing one picture five times.
+    from adapt.layout import LayoutPlan, rebind
+    vso = "Vector Smart Object"
+    src = _fake_source("BG", vso, "Text", vso, vso)
+    stale = LayoutPlan(970, 90)                 # saved before "BG" was extracted
+    for i, n in enumerate([vso, "Text", vso, vso]):
+        stale.add(_box(f"el{i}-object", i, n))
+
+    assert rebind(stale, src) == []
+    assert [p.element for p in stale.placements] == [1, 2, 3, 4]
+    assert [p.uid for p in stale.placements] == [vso, "Text", f"{vso}#2", f"{vso}#3"]
+
+
+def test_rebind_reports_an_element_that_is_gone_and_dedupes_ids():
+    from adapt.layout import LayoutPlan, rebind
+    src = _fake_source("Logo", "Text")
+    plan = LayoutPlan(970, 90)
+    plan.add(_box("el0-logo", 0, "Logo"))
+    plan.add(_box("el0-logo", 0, "Logo"))       # same element placed twice
+    plan.add(_box("el7-cta", 7, "Buy now", "cta"))
+
+    lost = rebind(plan, src)
+    assert [p.name for p in lost] == ["Buy now"]
+    ids = [p.id for p in plan.placements]
+    assert len(set(ids)) == len(ids), ids       # the editor addresses boxes by id
+    assert plan.placements[0].element == plan.placements[1].element == 0
+
+
+def test_saved_layouts_name_every_layer_the_same_way(source, tmp_path):
+    """End to end through the web API: open a master with plans saved under a
+    different extraction, and no layer may answer to two names or roles."""
+    from adapt import store
+    from adapt.web import create_app
+    from adapt.layout import LayoutPlan
+
+    c = create_app("input", str(tmp_path)).test_client()
+    assert c.post("/api/open", json={"path": INPUT}).status_code == 200
+    plans = {f: LayoutPlan.from_json(c.get(f"/api/plan/{f}").get_json()["plan"])
+             for f in ("970x90", "728x90", "160x600")}
+
+    # Age them the way a change to the extraction does: the names are the PSD's
+    # and stay put, but the indices shift and the roles come from whatever
+    # classification was in force. Only some formats are aged, which is what
+    # made one layer answer to two names in the first place.
+    stale = {"logo": "footer", "disclaimer": "rating", "headline": "scheme"}
+    for name, plan in plans.items():
+        if name == "160x600":
+            continue                                # saved after the change
+        for p in plan.placements:
+            if p.kind == "element":
+                p.uid = ""
+                p.element = (p.element or 0) + 3
+                p.role = stale.get(p.role, p.role)
+    store.save(INPUT, plans, out_dir=str(tmp_path))
+
+    c = create_app("input", str(tmp_path)).test_client()
+    assert c.post("/api/open", json={"path": INPUT}).status_code == 200
+    live = {e["uid"]: (e["name"], e["role"])
+            for e in c.get("/api/manifest").get_json()["elements"]}
+    seen = {}
+    for f in plans:
+        for p in c.get(f"/api/plan/{f}").get_json()["plan"]["placements"]:
+            if p["kind"] != "element":
+                continue
+            assert live[p["uid"]] == (p["name"], p["role"]), f"{f}/{p['id']}"
+            seen.setdefault(p["uid"], set()).add((p["name"], p["role"]))
+    assert seen, "no element placements to check"
+    for uid, labels in seen.items():
+        assert len(labels) == 1, f"{uid} reads as {labels} depending on the size"
+
+
+def test_one_element_is_never_placed_twice_by_the_wide_layout(source):
+    # A wide bottom text line classified as a logo satisfies both footer tests;
+    # placing it as the bar *and* the strip gave two boxes one id.
+    from adapt.reflow import plan_wide
+    for tw, th in ((970, 90), (728, 90), (468, 60)):
+        plan = plan_wide(source, tw, th)
+        used = [p.element for p in plan.placements if p.kind == "element"]
+        assert len(set(used)) == len(used), f"{tw}x{th} places an element twice"
+        ids = [p.id for p in plan.placements]
+        assert len(set(ids)) == len(ids), f"{tw}x{th} has duplicate ids"
 
 
 def test_detect_objects_flat_fallback():

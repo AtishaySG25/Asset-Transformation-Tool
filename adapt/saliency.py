@@ -77,29 +77,39 @@ def detect_objects(bgr: np.ndarray, min_area_frac: float = 0.002):
     return boxes[:12]
 
 
-def importance_map(bgr: np.ndarray, elements=None) -> np.ndarray:
+def importance_map(bgr: np.ndarray, elements=None, max_dim: int = 1400) -> np.ndarray:
     """Fuse saliency + edge density (+ known element boxes) into [0,1].
 
     When semantic elements are known (PSD path) their boxes are stamped in with a
     weight proportional to role priority, so the crop keeps logo/CTA/text first.
+
+    The map only ever drives coarse decisions — which band of the image to keep —
+    so it is computed on a copy no larger than ``max_dim`` and scaled back up.
+    On a 24-megapixel master that is the difference between seconds and tens of
+    seconds, and the chosen crop is identical.
     """
-    sal = saliency_map(bgr)
-    edg = edge_density(bgr)
-    imp = 0.5 * sal + 0.5 * edg
+    H, W = bgr.shape[:2]
+    k = min(1.0, max_dim / max(H, W))
+    small = (cv2.resize(bgr, (max(1, round(W * k)), max(1, round(H * k))),
+                        interpolation=cv2.INTER_AREA) if k < 1 else bgr)
+
+    imp = 0.5 * saliency_map(small) + 0.5 * edge_density(small)
 
     if elements:
-        h, w = bgr.shape[:2]
+        h, w = small.shape[:2]
         boost = np.zeros((h, w), np.float32)
         for el in elements:
             if el.role in ("background",):
                 continue
-            l, t, r, b = el.bbox
+            l, t, r, b = (round(v * k) for v in el.bbox)
             l, t = max(0, l), max(0, t)
             r, b = min(w, r), min(h, b)
             if r <= l or b <= t:
                 continue
             boost[t:b, l:r] = np.maximum(boost[t:b, l:r], el.priority / 100.0)
-        boost = cv2.GaussianBlur(boost, (0, 0), 9)
+        boost = cv2.GaussianBlur(boost, (0, 0), max(1.0, 9 * k))
         imp = imp + 1.2 * boost
 
+    if k < 1:
+        imp = cv2.resize(imp, (W, H), interpolation=cv2.INTER_LINEAR)
     return _normalize(imp)
