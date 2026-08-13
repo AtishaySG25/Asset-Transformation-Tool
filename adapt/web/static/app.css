@@ -226,6 +226,25 @@ body.actual-size .shot img { max-width: none; }
 .rowbtns button { flex: 1; min-width: 68px; }
 .divider { height: 1px; background: var(--line); margin: 10px 0; }
 
+/* Copy-to picker: anchored under the header button it belongs to, so it reads
+   as that button's menu rather than a page-level dialog. */
+.copybox {
+  position: absolute; top: 46px; right: 210px; z-index: 60; width: 290px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .5); padding: 4px 0 2px;
+}
+.copybox .cap {
+  color: var(--muted); font-size: 11px; text-transform: uppercase;
+  letter-spacing: .8px; padding: 8px 12px 4px;
+}
+.copyrow {
+  display: flex; align-items: center; gap: 8px; padding: 5px 12px;
+  cursor: pointer;
+}
+.copyrow:hover { background: var(--panel-2); }
+.copyrow b { min-width: 58px; }
+.copyrow .spacer { flex: 1; }
+
 .compare { padding: 10px 0 0; }
 .compare img { display: block; outline: 1px solid var(--line); margin: 0 auto; }
 .compare .cap { color: var(--muted); text-align: center; padding: 6px; font-size: 12px; }

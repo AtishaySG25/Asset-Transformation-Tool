@@ -23,6 +23,7 @@ Routes
 ``PUT  /api/plan/<fmt>``         persist a hand-edited plan
 ``POST /api/plan/<fmt>/reset``   drop the manual layout, back to the algorithm
 ``POST /api/plan/<fmt>/explode`` break a flat 'fit' plan into per-element boxes
+``POST /api/plan/<fmt>/copy-to`` reuse this layout at other sizes, rescaled
 ``POST /api/plan/<fmt>/raw``     every layer in reading order (manual fallback)
 ``GET  /api/render/<fmt>.png``   render the stored plan (``?download=1`` to save)
 ``POST /api/render/<fmt>.png``   render a posted plan (live preview / export)
@@ -49,7 +50,7 @@ from .. import log, saliency, store
 from ..formats import FORMATS, Format
 from ..layout import LayoutPlan, Placement, rebind
 from ..pipeline import (_bgr, effective_strategy, plan_explode, plan_for_format,
-                        plan_raw, render as render_image, review)
+                        plan_raw, render as render_image, rescale_plan, review)
 from ..psd_source import load
 from ..render import placement_tile
 
@@ -409,6 +410,43 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
         return jsonify({"format": fmt, "plan": plan.to_json(),
                         "edited": fmt in s.saved, "rev": s.rev,
                         "warnings": review(plan, s.source)})
+
+    @app.post("/api/plan/<fmt>/copy-to")
+    def api_plan_copy_to(fmt):
+        """Reuse this format's layout at other sizes.
+
+        Fixing a master the algorithm read badly is a lot of work, and doing it
+        again per format is both the same work and a good way to end up with
+        three banners that do not match. The layout is rescaled (see
+        :func:`adapt.pipeline.rescale_plan`) and saved as each target's own
+        hand-edited plan, which it then is — free to diverge afterwards.
+
+        Targets that already carry manual edits are skipped unless ``overwrite``
+        is set, so this cannot quietly destroy work done at the other size.
+        """
+        s = session()
+        s.fmt(fmt)                                   # validates the source format
+        d = request.get_json(silent=True) or {}
+        targets = [str(t) for t in (d.get("targets") or [])]
+        overwrite = bool(d.get("overwrite"))
+        if not targets:
+            abort(400, "no target sizes given")
+
+        plan = s.plan(fmt)
+        written, skipped = [], []
+        for name in targets:
+            if name == fmt:
+                continue
+            f = s.fmt(name)                          # 404s an unknown size
+            if name in s.saved and not overwrite:
+                skipped.append(name)
+                continue
+            s.set_plan(name, rescale_plan(plan, f.width, f.height, s.source))
+            written.append(name)
+        log.log(f"copied {fmt} layout to {', '.join(written) or 'nothing'}"
+                + (f" (skipped edited: {', '.join(skipped)})" if skipped else ""))
+        return jsonify({"written": written, "skipped": skipped,
+                        "manifest": s.manifest()})
 
     # ------------------------------------------------------------ renders --
     def _render_bytes(fmt: str, plan: LayoutPlan) -> bytes:

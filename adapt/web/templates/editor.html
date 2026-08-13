@@ -23,11 +23,22 @@
     <input id="zoom" type="range" min="0.5" max="8" step="0.5" value="1">
     <span class="asset" id="zoomLabel">100%</span>
     <button id="explode" hidden title="Break the flat composite into per-element boxes">Explode elements</button>
+    <button id="copyTo" title="Reuse this layout at the other sizes">Copy to…</button>
     <button id="reset">Reset to algorithm</button>
     <button id="compare">Show render</button>
     <button id="save" class="primary">Save</button>
     <button id="export">Export PNG</button>
   </header>
+
+  <div class="copybox" id="copyBox" hidden>
+    <div class="cap">Copy this layout to</div>
+    <div id="copyList"></div>
+    <div class="hint" id="copyNote"></div>
+    <div class="rowbtns">
+      <button id="copyGo" class="primary">Copy layout</button>
+      <button id="copyCancel">Cancel</button>
+    </div>
+  </div>
 
   <div class="workspace">
     <div class="panel">

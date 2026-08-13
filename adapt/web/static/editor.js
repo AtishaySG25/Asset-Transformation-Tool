@@ -844,36 +844,77 @@ function normaliseZ() {
 
 const hexToRgb = (h) => [1, 3, 5].map((i) => parseInt(h.substr(i, 2), 16));
 
+/* ------------------------------------------------- copy to other sizes -- */
+/* Fixing a master the algorithm read badly is a lot of work, and repeating it
+   per format is both the same work again and a good way to end up with three
+   banners that do not match. Rescaling happens server-side (pipeline.rescale_plan)
+   so re-wrapped text is genuinely re-measured at the new column width rather
+   than having its height scaled arithmetically. */
+function openCopy() {
+  const here = family(info);
+  const others = manifest.formats.filter((f) => f.name !== FMT);
+  if (!others.length) return toast("there is no other size to copy to", true);
+
+  $("copyList").innerHTML = others.map((f) => {
+    const same = family(f) === here;
+    return `<label class="copyrow">
+      <input type="checkbox" value="${f.name}" ${same ? "checked" : ""}>
+      <b>${f.name}</b>
+      <span class="lrole">${same ? "same shape" : family(f)}</span>
+      <span class="spacer"></span>
+      ${f.edited ? '<span class="badge edited">has edits</span>' : ""}
+    </label>`;
+  }).join("");
+  $("copyNote").textContent =
+    `Sizes of the same shape are pre-selected. The layout is rescaled to each `
+    + `target, then becomes that size's own — they can differ afterwards.`;
+  $("copyBox").hidden = false;
+}
+
+const closeCopy = () => { $("copyBox").hidden = true; };
+
+async function runCopy() {
+  const targets = [...$("copyList").querySelectorAll("input:checked")]
+    .map((i) => i.value);
+  if (!targets.length) return toast("pick at least one size", true);
+
+  // Anything already hand-edited is only overwritten on an explicit yes — the
+  // server skips them otherwise, so a mis-click cannot destroy the other size.
+  const edited = manifest.formats
+    .filter((f) => targets.includes(f.name) && f.edited).map((f) => f.name);
+  const overwrite = !edited.length || confirm(
+    `${edited.join(", ")} already ${edited.length > 1 ? "have" : "has"} manual `
+    + `edits. Replace ${edited.length > 1 ? "them" : "it"} with this layout?`);
+
+  if (!(await save())) return;                  // copy what is actually stored
+  try {
+    const r = await api(`/api/plan/${FMT}/copy-to`,
+                        jsonReq("POST", { targets, overwrite }));
+    manifest = r.manifest;
+    closeCopy();
+    const parts = [];
+    if (r.written.length) parts.push(`copied to ${r.written.join(", ")}`);
+    if (r.skipped.length) parts.push(`kept the edits in ${r.skipped.join(", ")}`);
+    toast(parts.join("; ") || "nothing to do");
+  } catch (e) { toast(e.message, true); }
+}
+
 /* ------------------------------------------------------- canvas resize -- */
-/* Changing the canvas rescales the whole layout: positions follow each axis,
-   aspect-locked graphics scale uniformly so they are never distorted, and type
-   size follows the smaller axis so text stays in proportion. */
+/* Changing the canvas rescales the whole layout onto a new size — the same
+   operation as copying to another format, so it goes through the same code. */
 async function resizeCanvas(nw, nh) {
   if (nw === plan.width && nh === plan.height) return;
-  const sx = nw / plan.width, sy = nh / plan.height, s = Math.min(sx, sy);
-  snapshot();
-  for (const p of plan.placements) {
-    p.x *= sx; p.y *= sy;
-    if (isText(p)) {
-      p.w *= sx; p.h *= sy;
-      p.params.line_h = Math.max(3, Math.round((p.params.line_h || 12) * s));
-    } else if (p.lock_aspect) {
-      p.w *= s; p.h *= s;
-    } else {
-      p.w *= sx; p.h *= sy;
-    }
-  }
-  plan.width = nw; plan.height = nh;
-  plan.placements.forEach(clampInside);
-
+  const name = `${nw}x${nh}`;
+  const existing = manifest.formats.find((f) => f.name === name);
+  if (existing && existing.edited
+      && !confirm(`${name} already has a manual layout. Replace it?`)) return;
+  if (!(await save())) return;
   try {
     await api("/api/formats", jsonReq("POST", { width: nw, height: nh }));
-    await api(`/api/plan/${nw}x${nh}`, jsonReq("PUT", plan));
-    location.href = `/edit/${nw}x${nh}`;
-  } catch (e) {
-    undo();
-    toast(e.message, true);
-  }
+    await api(`/api/plan/${FMT}/copy-to`,
+              jsonReq("POST", { targets: [name], overwrite: true }));
+    location.href = `/edit/${name}`;
+  } catch (e) { toast(e.message, true); }
 }
 
 /* ------------------------------------------------------- persist/export -- */
@@ -916,6 +957,9 @@ $("undo").onclick = undo;
 $("redo").onclick = redo;
 $("zoom").oninput = (e) => setZoom(Number(e.target.value));
 $("resize").onclick = () => resizeCanvas(Number($("cw").value), Number($("ch").value));
+$("copyTo").onclick = () => ($("copyBox").hidden ? openCopy() : closeCopy());
+$("copyGo").onclick = runCopy;
+$("copyCancel").onclick = closeCopy;
 
 $("reset").onclick = async () => {
   if (!confirm(`Discard manual changes to ${FMT} and go back to the algorithm?`)) return;
@@ -957,6 +1001,12 @@ const BRACKET = { "]": "up", "}": "up", BracketRight: "up",
                   "[": "down", "{": "down", BracketLeft: "down" };
 
 document.addEventListener("keydown", (e) => {
+  // Before the input guard: the picker is full of checkboxes, and Escape should
+  // close it whichever one has focus.
+  if (e.key === "Escape" && !$("copyBox").hidden) {
+    e.preventDefault();
+    return closeCopy();
+  }
   if (e.target.matches("input, select, textarea")) return;
   const ctrl = e.ctrlKey || e.metaKey;
   if (ctrl && e.key.toLowerCase() === "z") {

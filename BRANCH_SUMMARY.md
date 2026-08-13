@@ -15,6 +15,8 @@ Commits, in order:
 5. `bff0c2c` — Frame the background by hand; make downloads reliable
 6. `dafeecf` — Add bring-to-front and send-to-back
 7. `2b8fc52` — Keep cached images from outliving the asset they belong to
+8. `68177f8` — Fix layers mislabelled and drawing the wrong artwork
+9. (this one) — Copy a finished layout to the other sizes
 
 `e425bd2` (role inference / element budget / role picker) was committed and then
 reverted by `8477418`; the branch tree is byte-identical to `dafeecf`. The work
@@ -283,6 +285,33 @@ now reports one name and one role across all sizes, every box's index resolves t
 the layer it claims, and no plan holds a duplicate id. All six algorithmic renders
 are byte-identical before and after for all three masters, as are the
 `--use-layout` renders — the identity is repaired without moving anyone's pixels.
+
+## 11. Copying a layout between sizes
+
+Reported: a master the algorithm read badly needed heavy manual work at
+970x90, and then the *same* work again at 728x90 — the same effort twice, and a
+good way to end up with banners that do not match.
+
+`pipeline.rescale_plan` produces a copy of a plan at a new size: positions
+follow each axis, aspect-locked graphics scale uniformly so they are never
+distorted, and type size follows the smaller axis. Re-wrapped text is
+**re-measured** rather than scaled — its height is emergent from (width, line
+height), so arithmetic would store a box the renderer disagrees with once the
+words re-wrap in a narrower column. It asks the same `tiles.text_tile` the
+renderer uses, so a copied layout is truthful on arrival instead of being
+corrected by the editor afterwards.
+
+`POST /api/plan/<fmt>/copy-to` saves the rescaled plan as each target's own
+hand-edited layout. Targets that already carry manual edits are **skipped**
+unless `overwrite` is set, so a mis-click cannot destroy work at the other size;
+the editor confirms before setting it.
+
+**Copy to…** in the editor lists every other size with same-shape ones
+pre-selected (via the existing `family()` split), flags any that already have
+edits, and closes on Escape. `resizeCanvas` — previously its own copy of the
+scaling maths in JS — now goes through the same endpoint, so there is one
+implementation rather than two that have to agree, and it gains the text
+re-measurement for free.
 
 ## New CLI flags
 

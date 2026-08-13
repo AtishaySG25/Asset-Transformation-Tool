@@ -222,6 +222,97 @@ def test_switching_assets_invalidates_cached_images(tmp_path):
     assert "max-age=3600" in c.get("/api/master.png").headers["Cache-Control"]
 
 
+@needs_master
+def test_copy_layout_to_other_sizes(source, tmp_path):
+    """Reusing a hand-made layout at another size, rather than redoing it there.
+
+    The point is fidelity: re-wrapped text has an *emergent* height, so a copy
+    that scales the recorded height arithmetically stores a box the renderer
+    disagrees with. rescale_plan re-measures instead.
+    """
+    from adapt.web import create_app
+    c = create_app("input", str(tmp_path)).test_client()
+    assert c.post("/api/open", json={"path": INPUT}).status_code == 200
+
+    plan = c.get("/api/plan/970x90").get_json()["plan"]
+    for p in plan["placements"]:                   # an edit no algorithm makes
+        if p["params"].get("mode") == "reflow":
+            p["params"]["align"] = "right"
+    plan["placements"][1]["x"] = 9.0
+    assert c.put("/api/plan/970x90", json=plan).status_code == 200
+
+    r = c.post("/api/plan/970x90/copy-to", json={"targets": ["728x90", "468x60"]})
+    assert r.status_code == 200
+    assert r.get_json()["written"] == ["728x90", "468x60"]
+
+    for name, w, h in (("728x90", 728, 90), ("468x60", 468, 60)):
+        got = c.get(f"/api/plan/{name}").get_json()
+        out = got["plan"]
+        assert got["edited"] is True                       # it is now manual
+        assert (out["width"], out["height"]) == (w, h)     # at its own size
+        assert len(out["placements"]) == len(plan["placements"])
+        assert all(q["params"].get("align") == "right"
+                   for q in out["placements"]
+                   if q["params"].get("mode") == "reflow")
+        for q in out["placements"]:                        # nothing left the frame
+            assert q["x"] >= -0.5 and q["y"] >= -0.5
+            assert q["x"] + q["w"] <= w + 0.5 and q["y"] + q["h"] <= h + 0.5
+        with Image.open(io.BytesIO(c.get(f"/api/render/{name}.png").data)) as im:
+            assert im.size == (w, h)
+
+    # a stored text height must be the height that actually renders
+    from adapt.layout import LayoutPlan, resolve_element
+    from adapt import tiles
+    small = LayoutPlan.from_json(c.get("/api/plan/468x60").get_json()["plan"])
+    for q in small.placements:
+        if q.params.get("mode") != "reflow":
+            continue
+        el = resolve_element(source, q)
+        real = tiles.text_tile(el, max(8, round(q.w)),
+                               max(1, int(q.params["line_h"])),
+                               align=q.params.get("align", "left")).height
+        assert abs(real - q.h) <= 1.0, (q.id, q.h, real)
+
+    # an already-edited target is protected unless overwrite is explicit
+    assert c.post("/api/plan/970x90/copy-to",
+                  json={"targets": ["728x90"]}).get_json() \
+        == {**c.post("/api/plan/970x90/copy-to",
+                     json={"targets": ["728x90"]}).get_json(),
+            "written": [], "skipped": ["728x90"]}
+    assert c.post("/api/plan/970x90/copy-to",
+                  json={"targets": ["728x90"], "overwrite": True}
+                  ).get_json()["written"] == ["728x90"]
+
+    assert c.post("/api/plan/970x90/copy-to", json={"targets": []}).status_code == 400
+    assert c.post("/api/plan/970x90/copy-to",
+                  json={"targets": ["7x7"]}).status_code == 404
+    # and copying never mutates the layout being copied from
+    assert c.get("/api/plan/970x90").get_json()["plan"] == plan
+
+
+def test_rescale_plan_keeps_proportions_and_leaves_the_original_alone():
+    from adapt.layout import LayoutPlan, Placement
+    from adapt.pipeline import rescale_plan
+    plan = LayoutPlan(1000, 100, strategy="reflow-wide")
+    plan.add(Placement(id="a", kind="element", x=100, y=10, w=200, h=40,
+                       lock_aspect=True, params={"mode": "stretch"}))
+    plan.add(Placement(id="b", kind="color_bar", x=0, y=80, w=1000, h=20,
+                       lock_aspect=False, params={"color": [0, 0, 0]}))
+    before = plan.to_json()
+
+    out = rescale_plan(plan, 500, 50)
+    assert plan.to_json() == before, "the source plan must not be touched"
+    assert (out.width, out.height) == (500, 50)
+
+    a = out.by_id("a")
+    assert (a.x, a.y) == (50, 5)
+    # aspect-locked: scaled by the smaller axis ratio, never distorted
+    assert a.w / a.h == pytest.approx(200 / 40)
+    # a full-width bar still spans the full width
+    bar = out.by_id("b")
+    assert bar.x == 0 and bar.w == 500
+
+
 def test_web_api_round_trip(source, tmp_path):
     # Smoke-test the editor's own contract end to end through Flask.
     from adapt.web import create_app

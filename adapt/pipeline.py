@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFilter
 
 from . import log, saliency, tiles, store
 from .formats import FORMATS, strategy_for
-from .layout import LayoutPlan, Placement, element_id, rebind
+from .layout import LayoutPlan, Placement, element_id, rebind, resolve_element
 from .psd_source import load, Source
 from .render import render_plan
 from .smartcrop import crop_box
@@ -144,6 +144,61 @@ def _raw_placement(idx: int, el, x, y, w, h) -> Placement:
     return Placement(id=element_id(idx, el), kind="element", x=x, y=y, w=w, h=h,
                      element=idx, uid=el.uid, name=el.name, role=el.role,
                      params={"mode": "stretch"})
+
+
+def _clamp_into(plan: LayoutPlan) -> LayoutPlan:
+    """Pull every box back inside the frame — the guarantee the renderer makes,
+    applied to the plan so what is stored is what gets drawn."""
+    for p in plan.placements:
+        p.w = min(p.w, plan.width)
+        p.h = min(p.h, plan.height)
+        p.x = max(0.0, min(p.x, plan.width - p.w))
+        p.y = max(0.0, min(p.y, plan.height - p.h))
+    return plan
+
+
+def rescale_plan(plan: LayoutPlan, tw: int, th: int,
+                 source: Source | None = None) -> LayoutPlan:
+    """``plan`` laid out at a new size, as a new plan — the original is untouched.
+
+    Positions follow each axis, aspect-locked graphics scale uniformly so they
+    are never distorted, and type size follows the smaller axis so text keeps its
+    proportion rather than stretching with the canvas.
+
+    Re-wrapped text is then *re-measured* rather than scaled. Its height is
+    emergent from (width, line height) — scaling the recorded height arithmetically
+    stores a box the renderer will not agree with, because the words re-wrap at
+    the new column width. Given a ``source`` this asks the same
+    :func:`adapt.tiles.text_tile` the renderer uses, so a copied layout is
+    truthful the moment it lands rather than after the editor corrects it.
+    """
+    sx = tw / max(1, plan.width)
+    sy = th / max(1, plan.height)
+    s = min(sx, sy)
+    out = LayoutPlan.from_json(plan.to_json())      # deep copy, no cached tiles
+    out.width, out.height = int(tw), int(th)
+
+    for p in out.placements:
+        p.x *= sx
+        p.y *= sy
+        reflowed = p.params.get("mode") == "reflow"
+        if reflowed:
+            p.w *= sx
+            p.h *= sy
+            p.params["line_h"] = max(3, round(p.params.get("line_h", 12) * s))
+        elif p.lock_aspect:
+            p.w *= s
+            p.h *= s
+        else:
+            p.w *= sx
+            p.h *= sy
+        if reflowed and source is not None:
+            el = resolve_element(source, p)
+            if el is not None:
+                p.h = float(tiles.text_tile(
+                    el, max(8, round(p.w)), max(1, int(p.params["line_h"])),
+                    align=p.params.get("align", "left")).height)
+    return _clamp_into(out)
 
 
 # Below these, a layout exists but is not usable output. Calibrated against the

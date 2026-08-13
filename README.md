@@ -168,6 +168,21 @@ dependency-free vanilla-JS front end — no CDN, works offline.
   changes and keeps caching hard the rest of the time. Re-opening the same file
   mints a new token too, which is what makes a PSD edited on disk show up.
 * **Per format.** Moving something in `970x90` has no effect on `160x600`.
+* **Copy to…** — but repeating the *same* fix per format is neither. When the
+  algorithm reads a master badly, correcting it once is a lot of work and
+  correcting it again at every other banner size is the same work plus a good
+  chance the three end up not matching. **Copy to…** rescales this layout onto
+  whichever sizes you pick (same-shape ones pre-selected) and saves it as each
+  one's own manual layout, free to diverge afterwards. Sizes that already carry
+  manual edits are skipped unless you confirm, so it cannot quietly destroy work
+  done elsewhere. **Resize** is the same operation onto a brand-new size and
+  runs through the same code.
+
+  Rescaling is server-side (`pipeline.rescale_plan`) for a reason: a re-wrapped
+  text block's height is *emergent* from its width and line height, so scaling
+  the recorded height arithmetically stores a box the renderer will not agree
+  with — the words re-wrap differently in the narrower column. The copy asks the
+  same `tiles.text_tile` the renderer uses, so it is truthful on arrival.
 * **Reset to algorithm** per format, **Show render** to see the true server
   render beside the canvas, **Export PNG** (saves the current format), **Export
   all** (writes `output/`) and **Download all (.zip)** (every size in one
