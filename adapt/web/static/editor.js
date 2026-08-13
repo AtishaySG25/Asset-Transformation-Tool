@@ -12,10 +12,30 @@ const HISTORY = 120;                 // undo depth
 
 let manifest = null, plan = null, info = null;
 let zoom = 1, selId = null, saveTimer = null;
+const selIds = new Set();            // every selected id; selId is the primary
 let undoStack = [], redoStack = [], cropping = null;
 const boxes = new Map();             // placement id -> DOM node
 
-const sel = () => plan.placements.find((p) => p.id === selId) || null;
+/* Selection is a set with a "primary" (the last one clicked). `sel()` is the
+   single-placement view the properties panel uses — deliberately null when more
+   than one is selected, so per-element fields cannot silently edit just one of
+   them; group operations take over instead. */
+const selected = () => plan.placements.filter((p) => selIds.has(p.id));
+const sel = () => (selIds.size === 1
+  ? plan.placements.find((p) => selIds.has(p.id)) || null
+  : null);
+const primary = () => plan.placements.find((p) => p.id === selId) || null;
+
+/* The union box of a selection, in output pixels. Group move and resize work on
+   this rather than on each box, so the arrangement inside it is preserved. */
+function groupBox(list = selected()) {
+  if (!list.length) return null;
+  const x = Math.min(...list.map((p) => p.x));
+  const y = Math.min(...list.map((p) => p.y));
+  const r = Math.max(...list.map((p) => p.x + p.w));
+  const b = Math.max(...list.map((p) => p.y + p.h));
+  return { x, y, w: Math.max(1e-6, r - x), h: Math.max(1e-6, b - y) };
+}
 const byZ = () => [...plan.placements].sort((a, b) => a.z - b.z);
 const isText = (p) => p.kind === "element" && p.params.mode === "reflow";
 const canCrop = (p) => p.kind === "element" && p.params.mode !== "reflow";
@@ -82,6 +102,7 @@ async function loadPlan(fresh = null) {
   $("cw").value = plan.width;
   $("ch").value = plan.height;
   undoStack = []; redoStack = [];
+  selIds.clear();
   selId = null;
   rebuild();
 }
@@ -103,7 +124,11 @@ function showWarnings(warnings) {
 function rebuild() {
   boxes.forEach((n) => n.remove());
   boxes.clear();
-  if (selId && !plan.placements.some((p) => p.id === selId)) selId = null;
+  // a restack or a removal can leave ids behind that no longer exist
+  for (const id of [...selIds]) {
+    if (!plan.placements.some((p) => p.id === id)) selIds.delete(id);
+  }
+  if (!selIds.has(selId)) selId = [...selIds][selIds.size - 1] ?? null;
   paint();
 }
 
@@ -132,6 +157,7 @@ function paint() {
   stage.style.height = `${plan.height * zoom}px`;
   stage.style.backgroundColor = cssColor(plan.base_color);
   for (const p of byZ()) syncBox(p);
+  drawGroupFrame();
   drawLayers();
   drawProps();
 }
@@ -153,8 +179,8 @@ function syncBox(p) {
   el.style.zIndex = p.z;
   el.style.opacity = p.opacity ?? 1;
   el.classList.toggle("hidden", !p.visible);
-  el.classList.toggle("sel", p.id === selId && !cropping);
-  el.classList.toggle("outline", p.id !== selId);
+  el.classList.toggle("sel", selIds.has(p.id) && !cropping);
+  el.classList.toggle("outline", !selIds.has(p.id));
   el.style.background = p.kind === "color_bar" ? cssColor(p.params.color) : "";
   el.style.justifyContent = { center: "center", right: "flex-end" }[p.params.align]
                             || "flex-start";
@@ -172,7 +198,7 @@ function syncBox(p) {
     }
     sizeTileImg(p, img);
   }
-  if (p.id === selId && !cropping) addHandles(el);
+  if (selIds.size === 1 && selIds.has(p.id) && !cropping) addHandles(el);
   else el.querySelectorAll(".handle").forEach((h) => h.remove());
 }
 
@@ -238,11 +264,51 @@ function addHandles(el) {
 }
 
 /* ---------------------------------------------------------- selection -- */
-function select(id) {
-  selId = id;
+/* `mode` is "set" (replace), "toggle" (ctrl/cmd-click) or "range" (shift-click
+   in the layers panel, which takes everything between the primary and here). */
+function select(id, mode = "set") {
+  if (id === null) {
+    selIds.clear();
+    selId = null;
+  } else if (mode === "toggle") {
+    if (selIds.has(id) && selIds.size > 1) {
+      selIds.delete(id);
+      if (selId === id) selId = [...selIds][selIds.size - 1];
+    } else {
+      selIds.add(id);
+      selId = id;
+    }
+  } else if (mode === "range" && selId && selId !== id) {
+    const order = byZ().map((p) => p.id);
+    const a = order.indexOf(selId), b = order.indexOf(id);
+    if (a >= 0 && b >= 0) {
+      for (const q of order.slice(Math.min(a, b), Math.max(a, b) + 1)) selIds.add(q);
+    }
+    selId = id;
+  } else {
+    selIds.clear();
+    selIds.add(id);
+    selId = id;
+  }
   for (const p of plan.placements) syncBox(p);
+  drawGroupFrame();
   drawLayers();
   drawProps();
+}
+
+/* One frame with handles around the whole selection. Per-box handles would be
+   ambiguous with several selected — dragging one would have to mean either
+   "resize that box" or "resize the group". */
+function drawGroupFrame() {
+  $("stage").querySelector("#groupFrame")?.remove();
+  const g = selIds.size > 1 && !cropping ? groupBox() : null;
+  if (!g) return;
+  const el = document.createElement("div");
+  el.id = "groupFrame";
+  el.style.cssText = `left:${g.x * zoom}px;top:${g.y * zoom}px;`
+    + `width:${g.w * zoom}px;height:${g.h * zoom}px`;
+  handleEls(el);
+  $("stage").appendChild(el);
 }
 
 /* ------------------------------------------------------------- history -- */
@@ -279,11 +345,25 @@ let drag = null;
 $("stage").addEventListener("pointerdown", (e) => {
   if (cropping) return;
   const handleEl = e.target.closest(".handle");
+
+  // A handle on the group frame resizes the whole selection at once.
+  if (handleEl && handleEl.parentElement.id === "groupFrame") {
+    startGroupDrag(e, handleEl.dataset.dir);
+    return;
+  }
+
   const boxEl = e.target.closest(".box");
   if (!boxEl) { select(null); return; }
   const p = plan.placements.find((x) => x.id === boxEl.dataset.id);
   if (!p) return;
-  if (!handleEl) select(p.id);
+  const add = e.ctrlKey || e.metaKey || e.shiftKey;
+  if (!handleEl) {
+    // Clicking inside an existing multi-selection keeps it, so the whole group
+    // can be dragged — replacing it would make a group impossible to move.
+    if (add) select(p.id, "toggle");
+    else if (!selIds.has(p.id)) select(p.id);
+  }
+  if (selIds.size > 1 && !handleEl) { startGroupDrag(e, null); return; }
   // Alt-drag inside a background box slides the imagery within the frame rather
   // than moving the frame — the box stays put, the picture behind it moves.
   const pan = !handleEl && e.altKey && isBg(p);
@@ -337,6 +417,118 @@ function applyMove(d, dx, dy) {
   snap(p);
   clampInside(p);
 }
+
+/* ------------------------------------------------------ group gestures -- */
+/* Several boxes move and resize as one. The group's union box is what the
+   gesture acts on, and each member keeps its position and size *relative* to
+   that box — so the arrangement inside the selection survives, which is the
+   whole point of selecting several. */
+let gdrag = null;
+
+function startGroupDrag(e, dir) {
+  const list = selected();
+  if (!list.length) return;
+  gdrag = {
+    dir, moved: false, sx: e.clientX, sy: e.clientY,
+    box: groupBox(list),
+    items: list.map((p) => ({
+      p, x: p.x, y: p.y, w: p.w, h: p.h, line_h: p.params.line_h || 0,
+    })),
+  };
+  e.target.setPointerCapture(e.pointerId);
+  e.preventDefault();
+}
+
+function groupMove(dx, dy) {
+  const g = gdrag.box;
+  // Clamp the whole group, not each box: clamping individually would squeeze
+  // the members together against the frame edge and lose the arrangement.
+  const ox = Math.max(-g.x, Math.min(dx, plan.width - g.w - g.x));
+  const oy = Math.max(-g.y, Math.min(dy, plan.height - g.h - g.y));
+  for (const it of gdrag.items) {
+    it.p.x = it.x + ox;
+    it.p.y = it.y + oy;
+  }
+}
+
+function groupResize(dx, dy, freeAspect) {
+  const g = gdrag.box, d = gdrag.dir;
+  let fx = 1, fy = 1;
+  if (d.includes("e")) fx = (g.w + dx) / g.w;
+  if (d.includes("w")) fx = (g.w - dx) / g.w;
+  if (d.includes("s")) fy = (g.h + dy) / g.h;
+  if (d.includes("n")) fy = (g.h - dy) / g.h;
+  // Corners scale uniformly unless Shift: a group has no single aspect to keep,
+  // so distorting it by default would silently reshape every member.
+  if (!freeAspect && d.length === 2) fx = fy = Math.min(fx, fy);
+  const lo = MIN / Math.max(g.w, g.h);
+  fx = Math.max(lo, fx);
+  fy = Math.max(lo, fy);
+
+  // Anchor the edge or corner opposite the one being dragged.
+  const ax = d.includes("w") ? g.x + g.w : g.x;
+  const ay = d.includes("n") ? g.y + g.h : g.y;
+  const s = Math.min(fx, fy);
+
+  for (const it of gdrag.items) {
+    const p = it.p;
+    p.x = ax + (it.x - ax) * fx;
+    p.y = ay + (it.y - ay) * fy;
+    // Same rules the server uses when rescaling a whole plan onto a new size
+    // (pipeline.rescale_plan), so a group resize and a Copy-to agree.
+    if (isText(p)) {
+      p.w = it.w * fx;
+      p.h = it.h * fy;
+      p.params.line_h = Math.max(3, Math.round(it.line_h * s));
+    } else if (p.lock_aspect) {
+      p.w = it.w * s;
+      p.h = it.h * s;
+    } else {
+      p.w = it.w * fx;
+      p.h = it.h * fy;
+    }
+  }
+  // Only pull back inside once the whole group is placed, so a member is not
+  // clamped against an edge the group is still moving away from.
+  const now = groupBox(gdrag.items.map((it) => it.p));
+  const back = {
+    x: Math.min(0, plan.width - (now.x + now.w)) - Math.min(0, now.x),
+    y: Math.min(0, plan.height - (now.y + now.h)) - Math.min(0, now.y),
+  };
+  if (back.x || back.y) {
+    for (const it of gdrag.items) { it.p.x += back.x; it.p.y += back.y; }
+  }
+}
+
+$("stage").addEventListener("pointermove", (e) => {
+  if (!gdrag) return;
+  const dx = (e.clientX - gdrag.sx) / zoom;
+  const dy = (e.clientY - gdrag.sy) / zoom;
+  if (!gdrag.moved) {
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+    gdrag.moved = true;
+    undoStack.push(JSON.stringify(plan));
+    redoStack.length = 0;
+    syncHistoryButtons();
+  }
+  if (gdrag.dir) groupResize(dx, dy, e.shiftKey);
+  else groupMove(dx, dy);
+  for (const it of gdrag.items) syncBox(it.p);
+  drawGroupFrame();
+  drawProps();
+});
+
+function endGroupDrag() {
+  if (!gdrag) return;
+  const { items, moved } = gdrag;
+  gdrag = null;
+  if (!moved) return;
+  for (const it of items) if (isText(it.p)) syncBox(it.p);   // re-wrap at new width
+  drawGroupFrame();
+  markDirty();
+}
+$("stage").addEventListener("pointerup", endGroupDrag);
+$("stage").addEventListener("pointercancel", endGroupDrag);
 
 /* Dragging right should carry the imagery right, which means the viewport moves
    left over it — hence the sign. The divisor is the scaled picture, so a pan
@@ -558,7 +750,7 @@ function drawLayers() {
   host.innerHTML = "";
   for (const p of byZ().reverse()) {
     const row = document.createElement("div");
-    row.className = `layer${p.id === selId ? " sel" : ""}${p.visible ? "" : " hidden"}`;
+    row.className = `layer${selIds.has(p.id) ? " sel" : ""}${p.visible ? "" : " hidden"}`;
     row.draggable = true;
     row.dataset.id = p.id;
     row.innerHTML = `<span class="grip">⠿</span>
@@ -572,9 +764,17 @@ function drawLayers() {
       if (where) return stack(p, where);
       if (e.target.classList.contains("eye")) {
         snapshot();
-        p.visible = !p.visible;
-        syncBox(p); drawLayers(); markDirty();
-      } else select(p.id);
+        // The eye on a row inside a multi-selection acts on the whole selection,
+        // so a dozen decorative layers go dark in one click.
+        const targets = selIds.has(p.id) && selIds.size > 1 ? selected() : [p];
+        const to = !p.visible;
+        for (const q of targets) q.visible = to;
+        targets.forEach(syncBox);
+        drawLayers(); drawProps(); markDirty();
+      } else {
+        select(p.id, e.shiftKey ? "range"
+                   : (e.ctrlKey || e.metaKey) ? "toggle" : "set");
+      }
     };
     row.ondragstart = (e) => e.dataTransfer.setData("text/plain", p.id);
     row.ondragover = (e) => {
@@ -631,6 +831,122 @@ function stack(p, where) {
   restackTo(order);
 }
 
+/* Properties for a multi-selection: the operations that make sense on several
+   boxes at once. Per-element fields are deliberately absent — one x/y box would
+   have to either edit all of them to the same value (destroying the
+   arrangement) or silently edit only one. */
+function drawGroupProps(host) {
+  const list = selected();
+  const g = groupBox(list);
+  const hidden = list.filter((p) => !p.visible).length;
+  host.innerHTML = `
+    <div class="prop"><label>selected</label><b>${list.length} layers</b></div>
+    <div class="prop"><label>bounds</label>
+      <span class="lrole">${Math.round(g.w)} x ${Math.round(g.h)} at
+      ${Math.round(g.x)}, ${Math.round(g.y)}</span></div>
+    <div class="hint">Drag inside the frame to move them together; drag a handle
+      to resize them together (Shift to stretch freely). Arrow keys nudge.</div>
+    <div class="divider"></div>
+    <div class="cap" style="padding:2px 12px">Align</div>
+    <div class="rowbtns">
+      <button data-g="left">Left</button>
+      <button data-g="hcentre">Centre</button>
+      <button data-g="right">Right</button>
+      <button data-g="top">Top</button>
+      <button data-g="vcentre">Middle</button>
+      <button data-g="bottom">Bottom</button>
+    </div>
+    <div class="cap" style="padding:2px 12px">Arrange</div>
+    <div class="rowbtns">
+      <button data-g="row" title="Lay them out side by side, in their current order">Side by side</button>
+      <button data-g="column" title="Stack them one above the other">Stacked</button>
+      <button data-g="spreadH">Space across</button>
+      <button data-g="spreadV">Space down</button>
+    </div>
+    <div class="cap" style="padding:2px 12px">Whole selection</div>
+    <div class="rowbtns">
+      <button data-g="centreInFrame">Centre in frame</button>
+      <button data-g="visible">${hidden ? "Show all" : "Hide all"}</button>
+      <button data-g="front">Bring to front</button>
+      <button data-g="back">Send to back</button>
+      <button data-g="remove">Remove</button>
+    </div>`;
+  host.querySelectorAll("[data-g]").forEach((b) => {
+    b.onclick = () => groupOp(b.dataset.g, list);
+  });
+}
+
+/* One place for every group action, so they all snapshot and repaint alike. */
+function groupOp(op, list) {
+  snapshot();
+  const g = groupBox(list);
+  const ordered = [...list].sort((a, b) => (a.x - b.x) || (a.y - b.y));
+  const stacked = [...list].sort((a, b) => (a.y - b.y) || (a.x - b.x));
+
+  if (op === "left") for (const p of list) p.x = g.x;
+  if (op === "right") for (const p of list) p.x = g.x + g.w - p.w;
+  if (op === "hcentre") for (const p of list) p.x = g.x + (g.w - p.w) / 2;
+  if (op === "top") for (const p of list) p.y = g.y;
+  if (op === "bottom") for (const p of list) p.y = g.y + g.h - p.h;
+  if (op === "vcentre") for (const p of list) p.y = g.y + (g.h - p.h) / 2;
+
+  if (op === "row") {                       // butt them up left to right
+    let x = g.x;
+    for (const p of ordered) { p.x = x; x += p.w; }
+  }
+  if (op === "column") {                    // ...or top to bottom
+    let y = g.y;
+    for (const p of stacked) { p.y = y; y += p.h; }
+  }
+  if (op === "spreadH") {                   // equal gaps across the group box
+    const gap = (g.w - ordered.reduce((t, p) => t + p.w, 0))
+                / Math.max(1, ordered.length - 1);
+    let x = g.x;
+    for (const p of ordered) { p.x = x; x += p.w + gap; }
+  }
+  if (op === "spreadV") {
+    const gap = (g.h - stacked.reduce((t, p) => t + p.h, 0))
+                / Math.max(1, stacked.length - 1);
+    let y = g.y;
+    for (const p of stacked) { p.y = y; y += p.h + gap; }
+  }
+
+  if (op === "centreInFrame") {
+    const ox = (plan.width - g.w) / 2 - g.x;
+    const oy = (plan.height - g.h) / 2 - g.y;
+    for (const p of list) { p.x += ox; p.y += oy; }
+  }
+  if (op === "visible") {
+    const to = list.some((p) => !p.visible);
+    for (const p of list) p.visible = to;
+  }
+  if (op === "front" || op === "back") {
+    // Move them as a block, keeping their order relative to each other.
+    const rest = byZ().filter((p) => !selIds.has(p.id));
+    const block = byZ().filter((p) => selIds.has(p.id));
+    restackTo(op === "front" ? [...rest, ...block] : [...block, ...rest]);
+    return;                                  // restackTo repaints and saves
+  }
+  if (op === "remove") {
+    if (!confirm(`Remove ${list.length} layers from this layout? `
+                 + `Ctrl+Z undoes it, and Reset to algorithm brings everything back.`))
+      return;
+    plan.placements = plan.placements.filter((p) => !selIds.has(p.id));
+    normaliseZ();
+    select(null);
+    rebuild();
+    markDirty();
+    return;
+  }
+
+  list.forEach(clampInside);
+  list.forEach(syncBox);
+  drawGroupFrame();
+  drawLayers();
+  drawProps();
+  markDirty();
+}
+
 /* ---------------------------------------------------------- properties -- */
 function num(lbl, val, on, step = 1) {
   return `<div class="prop"><label>${lbl}</label>
@@ -643,9 +959,12 @@ const hasBackdrop = (p) => plan.placements.some((q) => q.id === bgIdFor(p));
 
 function drawProps() {
   const host = $("props");
+  if (selIds.size > 1) return drawGroupProps(host);
   const p = sel();
   if (!p) {
-    host.innerHTML = '<div class="hint">Select an element on the canvas.</div>';
+    host.innerHTML = `<div class="hint">Select an element on the canvas.
+      Ctrl+click (or Shift+click a layer row) to select several and move,
+      resize, align or hide them together.</div>`;
     return;
   }
   if (cropping) {
@@ -741,16 +1060,30 @@ function drawProps() {
     if (canCrop(p)) {
       html += `<button data-do="crop">Crop…</button>`;
       if (p.params.crop) html += `<button data-do="uncrop">Reset crop</button>`;
+      html += `<button data-do="split">Split…</button>`;
     }
     html += `</div>`;
+    if (splitting === p.id) html += splitControls(p);
   }
   html += `<div class="hint">Arrow keys nudge (Shift = 10px). [ and ] move one
-           step in the stack, Ctrl+Shift+[ / ] go all the way. Ctrl+Z undo.</div>`;
+           step in the stack, Ctrl+Shift+[ / ] go all the way. H hides,
+           Delete removes. Ctrl+Z undo.</div>`;
   host.innerHTML = html;
   wireProps(host, p);
 }
 
 function wireProps(host, p) {
+  host.querySelectorAll("[data-split]").forEach((inp) => {
+    inp.onchange = () => {
+      const k = inp.dataset.split;
+      if (k === "mode") splitMode = inp.value;
+      if (k === "cols") splitCols = Math.max(1, Number(inp.value) || 1);
+      if (k === "rows") splitRows = Math.max(1, Number(inp.value) || 1);
+      if (k === "want") splitWant = Math.max(2, Number(inp.value) || 2);
+      drawProps();
+    };
+  });
+
   host.querySelectorAll("[data-on]").forEach((inp) => {
     const commit = (live) => {
       const k = inp.dataset.on;
@@ -793,6 +1126,9 @@ function wireProps(host, p) {
       if (a === "cropCancel") return endCrop(false);
       if (a === "uncrop") return resetCrop(p);
       if (a === "backdrop") return toggleBackdrop(p);
+      if (a === "split") { splitting = p.id; return drawProps(); }
+      if (a === "splitCancel") { splitting = null; return drawProps(); }
+      if (a === "splitGo") return runSplit(p);
       const moves = { toFront: "front", toBack: "back",
                       forward: "forward", backward: "backward" };
       if (moves[a]) return stack(p, moves[a]);   // takes its own snapshot
@@ -813,6 +1149,96 @@ function wireProps(host, p) {
       syncBox(p); drawLayers(); drawProps(); markDirty();
     };
   });
+}
+
+/* ---------------------------------------------------------------- split -- */
+/* A part is another placement of the same element carrying a different crop, so
+   the parts start exactly where the whole was — splitting changes nothing on
+   screen until you move a piece. That is what makes it safe to try. */
+let splitting = null;
+
+function splitControls(p) {
+  const m = splitMode;
+  return `<div class="divider"></div>
+    <div class="prop"><label>split</label>
+      <select data-split="mode">
+        ${[["auto", "where it divides"], ["x", "into columns"],
+           ["y", "into rows"], ["grid", "even grid"]].map(([v, t]) =>
+          `<option value="${v}" ${m === v ? "selected" : ""}>${t}</option>`).join("")}
+      </select></div>
+    ${m === "grid"
+      ? `<div class="prop"><label>columns</label>
+           <input type="number" min="1" max="12" value="${splitCols}" data-split="cols"></div>
+         <div class="prop"><label>rows</label>
+           <input type="number" min="1" max="12" value="${splitRows}" data-split="rows"></div>`
+      : `<div class="prop"><label>at most</label>
+           <input type="number" min="2" max="12" value="${splitWant}" data-split="want"></div>`}
+    <div class="hint">${m === "grid"
+      ? "Cuts an even grid — use this when the artwork has no gaps to find."
+      : "Finds the gaps in the artwork itself and cuts there."}
+      The parts land where the whole was; move them afterwards.</div>
+    <div class="rowbtns">
+      <button class="primary" data-do="splitGo">Split into parts</button>
+      <button data-do="splitCancel">Cancel</button>
+    </div>`;
+}
+
+let splitMode = "auto", splitCols = 2, splitRows = 1, splitWant = 4;
+
+async function runSplit(p) {
+  const body = { element: p.element, crop: p.params.crop || null, mode: splitMode };
+  if (splitMode === "grid") { body.cols = splitCols; body.rows = splitRows; }
+  else body.parts = splitWant;
+
+  let rects;
+  try {
+    rects = (await api("/api/split", jsonReq("POST", body))).rects;
+  } catch (e) { return toast(e.message, true); }
+
+  if (rects.length < 2) {
+    return toast("no natural divisions found — try 'even grid' instead", true);
+  }
+
+  snapshot();
+  const base = { x: p.x, y: p.y, w: p.w, h: p.h };
+  const existing = p.params.crop || null;
+  const made = [];
+  rects.forEach((r, i) => {
+    const [l, t, rr, b] = r;
+    const part = JSON.parse(JSON.stringify(p));
+    part.id = `${p.id}~${i + 1}`;
+    part.params.crop = composeCrop(existing, r);
+    // Tile the original box exactly, so the composite is unchanged at the moment
+    // of splitting and the pieces are already in the right relationship.
+    part.x = base.x + l * base.w;
+    part.y = base.y + t * base.h;
+    part.w = Math.max(MIN, (rr - l) * base.w);
+    part.h = Math.max(MIN, (b - t) * base.h);
+    part.z = p.z + i;
+    made.push(part);
+  });
+
+  const rest = byZ().filter((q) => q.id !== p.id);
+  const at = rest.findIndex((q) => q.z > p.z);
+  rest.splice(at < 0 ? rest.length : at, 0, ...made);
+  restackTo(rest);                                  // repaints and saves
+
+  splitting = null;
+  selIds.clear();
+  for (const q of made) selIds.add(q.id);
+  selId = made[made.length - 1].id;
+  rebuild();
+  toast(`split into ${made.length} parts — they are all selected, so you can `
+        + `arrange them together`);
+}
+
+/* A part is expressed against what the box shows; the stored crop is against
+   the whole image. Splitting something already cropped composes the two. */
+function composeCrop(existing, part) {
+  const [l, t, r, b] = part;
+  if (!existing) return [l, t, r, b];
+  const [L, T, R, B] = existing;
+  return [L + l * (R - L), T + t * (B - T), L + r * (R - L), T + b * (B - T)];
 }
 
 /* Put the master's own background imagery directly behind one element, as its
@@ -1019,18 +1445,55 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); endCrop(false); }
     return;
   }
-  const p = sel();
-  if (!p) return;
+  if (ctrl && e.key.toLowerCase() === "a") {       // select everything
+    e.preventDefault();
+    selIds.clear();
+    for (const q of plan.placements) selIds.add(q.id);
+    selId = byZ().at(-1)?.id ?? null;
+    for (const q of plan.placements) syncBox(q);
+    drawGroupFrame(); drawLayers(); drawProps();
+    return;
+  }
+
+  const list = selected();
+  if (!list.length) return;
   const stepPx = e.shiftKey ? 10 : 1;
   const moves = { ArrowLeft: [-stepPx, 0], ArrowRight: [stepPx, 0],
                   ArrowUp: [0, -stepPx], ArrowDown: [0, stepPx] };
   if (moves[e.key]) {
     e.preventDefault();
     snapshot();
-    p.x += moves[e.key][0];
-    p.y += moves[e.key][1];
-    clampInside(p); syncBox(p); drawProps(); markDirty();
-  } else if (e.key === "Escape") {
+    const [mx, my] = moves[e.key];
+    if (list.length > 1) {
+      // Nudge the group as a block — clamping each box on its own would close
+      // the gaps between them once the group meets an edge.
+      const g = groupBox(list);
+      const ox = Math.max(-g.x, Math.min(mx, plan.width - g.w - g.x));
+      const oy = Math.max(-g.y, Math.min(my, plan.height - g.h - g.y));
+      for (const q of list) { q.x += ox; q.y += oy; }
+    } else {
+      list[0].x += mx;
+      list[0].y += my;
+      clampInside(list[0]);
+    }
+    list.forEach(syncBox);
+    drawGroupFrame(); drawProps(); markDirty();
+    return;
+  }
+  if (e.key === "Delete" || e.key === "Backspace") {
+    e.preventDefault();
+    snapshot();
+    plan.placements = plan.placements.filter((q) => !selIds.has(q.id));
+    normaliseZ();
+    select(null);
+    rebuild();
+    markDirty();
+    toast(`removed ${list.length} layer${list.length > 1 ? "s" : ""} — Ctrl+Z undoes it`);
+    return;
+  }
+
+  const p = primary() || list[0];
+  if (e.key === "Escape") {
     select(null);
   } else if (BRACKET[e.key] || BRACKET[e.code]) {
     // Ctrl+Shift goes all the way; bare [ / ] move one step. Matched on e.code
@@ -1038,11 +1501,15 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     const up = (BRACKET[e.key] || BRACKET[e.code]) === "up";
     const far = ctrl && e.shiftKey;
-    stack(p, up ? (far ? "front" : "forward") : (far ? "back" : "backward"));
-  } else if (e.key === "Delete" || e.key === "Backspace") {
+    if (list.length > 1) groupOp(far || up ? "front" : "back", list);
+    else stack(p, up ? (far ? "front" : "forward") : (far ? "back" : "backward"));
+  } else if (e.key.toLowerCase() === "h") {
+    e.preventDefault();                          // hide/show, was Delete's job
     snapshot();
-    p.visible = !p.visible;
-    syncBox(p); drawLayers(); drawProps(); markDirty();
+    const to = list.some((q) => !q.visible);
+    for (const q of list) q.visible = to;
+    list.forEach(syncBox);
+    drawLayers(); drawProps(); markDirty();
   }
 });
 

@@ -24,6 +24,7 @@ Routes
 ``POST /api/plan/<fmt>/reset``   drop the manual layout, back to the algorithm
 ``POST /api/plan/<fmt>/explode`` break a flat 'fit' plan into per-element boxes
 ``POST /api/plan/<fmt>/copy-to`` reuse this layout at other sizes, rescaled
+``POST /api/split``              where an element divides into parts
 ``POST /api/plan/<fmt>/raw``     every layer in reading order (manual fallback)
 ``GET  /api/render/<fmt>.png``   render the stored plan (``?download=1`` to save)
 ``POST /api/render/<fmt>.png``   render a posted plan (live preview / export)
@@ -46,7 +47,7 @@ from flask import (Flask, abort, jsonify, render_template, request,
                    send_file, url_for)
 
 from .. import formats as formats_mod
-from .. import log, saliency, store
+from .. import log, saliency, split, store, tiles
 from ..formats import FORMATS, Format
 from ..layout import LayoutPlan, Placement, rebind
 from ..pipeline import (_bgr, effective_strategy, plan_explode, plan_for_format,
@@ -410,6 +411,42 @@ def create_app(input_dir: str = "input", out_dir: str = "output") -> Flask:
         return jsonify({"format": fmt, "plan": plan.to_json(),
                         "edited": fmt in s.saved, "rev": s.rev,
                         "warnings": review(plan, s.source)})
+
+    @app.post("/api/split")
+    def api_split():
+        """Where an element divides into parts, as fractions of what is shown.
+
+        Pure geometry: the caller turns each rect into a placement carrying that
+        crop. Returning rects rather than a finished plan keeps the decision
+        about *where the parts go* with the editor, which is the thing holding
+        the layout.
+        """
+        d = request.get_json(silent=True) or {}
+        s = session()
+        try:
+            index = int(d.get("element"))
+        except (TypeError, ValueError):
+            abort(400, "element must be a whole number")
+        if not 0 <= index < len(s.source.elements):
+            abort(404, f"no element {index}")
+
+        img = s.source.elements[index].image
+        crop = d.get("crop")
+        if crop:
+            img = tiles.crop_fractions(img, [float(v) for v in crop])
+
+        mode = str(d.get("mode") or "auto")
+        if mode == "grid":
+            rects = split.grid_parts(d.get("cols", 2), d.get("rows", 1))
+        elif mode in ("auto", "x", "y"):
+            want = d.get("parts")
+            rects = split.auto_parts(img, axis=mode,
+                                     want=int(want) if want else None)
+        else:
+            abort(400, f"unknown split mode {mode!r}")
+
+        return jsonify({"rects": [list(r) for r in rects],
+                        "count": len(rects)})
 
     @app.post("/api/plan/<fmt>/copy-to")
     def api_plan_copy_to(fmt):

@@ -218,6 +218,15 @@ body.actual-size .shot img { max-width: none; }
 }
 .guide { position: absolute; background: var(--accent-2); z-index: 40; pointer-events: none; }
 
+/* The frame around a multi-selection. Dashed and in the second accent so it
+   reads as "these together" rather than as another box. */
+#groupFrame {
+  position: absolute; z-index: 45;
+  outline: 1px dashed var(--accent-2);
+  background: rgba(67, 179, 216, .07);
+  cursor: move;
+}
+
 .prop { display: flex; align-items: center; gap: 8px; padding: 4px 12px; }
 .prop label { width: 74px; color: var(--muted); }
 .prop input[type=number] { flex: 1; width: auto; }
