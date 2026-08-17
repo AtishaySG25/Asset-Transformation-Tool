@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from .elements import Element, assign_uids, classify
 from . import log, saliency
@@ -131,6 +131,78 @@ def _composite_scaled(node, box, k: float, mode: str, band: bool = False,
     return out
 
 
+# A background group frequently stacks the real product artwork on top of flat
+# wallpaper. Left alone the whole stack freezes into the backdrop, and a wide
+# banner then crops that backdrop to a letterbox strip — taking the product with
+# it. Scoring the children lets the artwork be promoted to a placeable element
+# that the layout engine can move and scale on its own.
+FOREGROUND_MIN_SCORE = 5.0
+SCORE_WORK_DIM = 400        # stats below are scale-tolerant; this keeps it quick
+
+
+def _foreground_score(img: Image.Image, canvas_area: float) -> float:
+    """How much a layer looks like artwork rather than backdrop.
+
+    Three signals, multiplied so a layer has to satisfy all of them:
+
+    * coverage — opaque area as a fraction of the *canvas*, not of the layer's
+      own bbox, so a full-bleed photo and a small sticker stay comparable.
+    * edges — mean Sobel magnitude over the opaque region.
+    * residual — how far the layer sits from its own heavy blur. A sky or a
+      gradient fill survives blurring almost unchanged; pillars, a bridge and
+      type do not. This is the signal that separates artwork from a backdrop
+      that is merely busy.
+    """
+    a = np.asarray(img)
+    mask = (a[:, :, 3].astype(np.float32) / 255.0) > 0.05
+    covered = float(mask.sum())
+    if covered < 16:
+        return 0.0
+
+    grey = a[:, :, :3].astype(np.float32).mean(axis=2)
+    gy, gx = np.gradient(grey)
+    edges = float(np.hypot(gx, gy)[mask].mean())
+
+    blur = np.asarray(img.convert("RGB").filter(
+        ImageFilter.GaussianBlur(radius=6))).astype(np.float32).mean(axis=2)
+    residual = float(np.abs(grey - blur)[mask].mean())
+
+    return (covered / max(1.0, canvas_area)) * edges * residual
+
+
+def _pick_foreground(group, W: int, H: int):
+    """The one sub-layer of a background group that carries the artwork.
+
+    Returns ``None`` when the group is uniformly backdrop. Only the top scorer
+    is promoted, deliberately: on the sample masters the runner-up is
+    decorative wallpaper (a chart grid, an arrow motif) that scores well on
+    edges yet belongs *behind* the content, so promoting it as well would place
+    the backdrop twice.
+    """
+    best, best_score, table = None, 0.0, []
+    for sub in group:
+        l, t, r, b = sub.bbox
+        l, t, r, b = max(0, l), max(0, t), min(W, r), min(H, b)
+        if r <= l or b <= t:
+            continue
+        ks = min(1.0, SCORE_WORK_DIM / max(r - l, b - t))
+        img = _composite_scaled(sub, (l, t, r, b), ks, "RGBA")
+        if img is None:
+            continue
+        score = _foreground_score(img, (W * ks) * (H * ks))
+        table.append((score, sub.name))
+        if score > best_score:
+            best, best_score = sub, score
+
+    for score, name in sorted(table, key=lambda x: -x[0]):
+        log.log(f"bg child {name!r} score {score:.2f}", 1)
+    if best is None or best_score < FOREGROUND_MIN_SCORE:
+        log.log("no sub-layer clears the foreground floor — background kept whole", 1)
+        return None
+    log.log(f"promoting {best.name!r} out of the background (score {best_score:.2f})", 1)
+    return best
+
+
 def to_working_size(source: Source, max_dim: int | None = None) -> Source:
     """Downscale a source in place to the working resolution.
 
@@ -200,7 +272,7 @@ def load_psd(path: str, max_dim: int | None = None) -> Source:
     background = None
     elements: list[Element] = []
 
-    def add_layer_as_element(layer, role):
+    def add_layer_as_element(layer, role, hero=False):
         # Composite only within the layer's own (canvas-clipped) bbox — far
         # cheaper than re-rendering the whole canvas per element.
         l, t, r, b = layer.bbox
@@ -222,7 +294,7 @@ def load_psd(path: str, max_dim: int | None = None) -> Source:
         bbox = (round(l * k) + x0, round(t * k) + y0,
                 round(l * k) + x1, round(t * k) + y1)
         elements.append(Element(role=role, name=layer.name, image=img, bbox=bbox,
-                                is_type=_has_type(layer)))
+                                is_type=_has_type(layer), is_hero=hero))
         log.log(f"element {layer.name!r} -> {role} {img.width}x{img.height} "
                 f"at {bbox} ({log.mb(img):.0f}MB)", 1)
 
@@ -231,10 +303,26 @@ def load_psd(path: str, max_dim: int | None = None) -> Source:
             role = classify(layer.name)
 
             if role == "background":
+                # A background *group* may be hiding the product artwork among
+                # its wallpaper; pull it out before flattening the rest.
+                hero = _pick_foreground(layer, W, H) if layer.is_group() else None
+
                 # The one place banding pays: a background group stacks several
                 # full-canvas sub-layers, and compositing them in one piece is
                 # what makes a big master unusable on a modest machine.
-                background = _composite_scaled(layer, viewport, k, "RGB", band=True)
+                if hero is None:
+                    background = _composite_scaled(layer, viewport, k, "RGB", band=True)
+                else:
+                    # Draw the backdrop *without* the hero, then add the hero as
+                    # its own element — otherwise it is painted twice, and the
+                    # copy baked into the backdrop is cropped to the format.
+                    hero.visible = False
+                    try:
+                        background = _composite_scaled(layer, viewport, k, "RGB",
+                                                       band=True)
+                    finally:
+                        hero.visible = True
+                    add_layer_as_element(hero, "object", hero=True)
                 log.log(f"background layer {layer.name!r}", 1)
                 continue
 

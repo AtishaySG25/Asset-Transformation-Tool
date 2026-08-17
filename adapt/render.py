@@ -32,8 +32,16 @@ def placement_tile(p: Placement, source, scale: float = 1.0) -> Image.Image | No
                                   crop=p.params.get("crop"))
 
     if p.kind == "photo_band":
+        # A band normally shows the backdrop, but when the planner found a hero
+        # element it carries that element's identity and draws it instead — the
+        # product artwork reads as the centrepiece rather than as wallpaper.
+        img = source.background
+        if p.element is not None or p.uid:
+            el = resolve_element(source, p)
+            if el is not None:
+                img = el.image
         return tiles.photo_band_tile(
-            source.background, round(p.w * scale), round(p.h * scale),
+            img, round(p.w * scale), round(p.h * scale),
             feather=float(p.params.get("feather", 0.0)),
             focus_x=float(p.params.get("focus_x", 0.5)),
             focus_y=p.params.get("focus_y"),

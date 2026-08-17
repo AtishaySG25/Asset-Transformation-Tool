@@ -28,8 +28,49 @@ def _indexed(source):
     return list(enumerate(source.elements))
 
 
+# A hero promoted out of the background is full-bleed imagery, so it belongs in
+# the photo band rather than in a column: as a column it is capped to a fraction
+# of the width and lands as a thumbnail, while every other column shrinks to make
+# room for it.
+HERO_MIN_OPACITY = 0.95
+
+# How far a graphic column may be squeezed before the shrink has to be shared
+# with the text columns too.
+GRAPHIC_MIN_SCALE = 0.35
+MIN_GRAPHIC_W = 8
+
+
+def _hero_band(source):
+    """The hero element to draw as the photo band, as ``(idx, el)``.
+
+    Only a near-opaque hero qualifies. A cut-out product with real transparency
+    would be flattened against black by the band's cover-fit path, and it reads
+    better as a placed element anyway — so it is left in the columns and the
+    band falls back to the backdrop.
+    """
+    import numpy as np
+
+    for idx, el in _indexed(source):
+        if not getattr(el, "is_hero", False):
+            continue
+        a = np.asarray(el.image.convert("RGBA"))[:, :, 3]
+        if float((a > 250).mean()) >= HERO_MIN_OPACITY:
+            return idx, el
+        return None, None                    # hero exists but is a cut-out
+    return None, None
+
+
+def _band_placement(plan, source, idx, el, **kw):
+    """A photo-band placement, tagged with the hero's identity when there is one
+    so :func:`adapt.render.placement_tile` knows which pixels to draw."""
+    ident = {} if el is None else {
+        "element": idx, "uid": el.uid, "name": el.name, "role": el.role}
+    plan.add(Placement(id="photo-band", kind="photo_band", lock_aspect=False,
+                       **ident, **kw))
+
+
 # -------------------------------------------------------------- portrait --
-def _tall_specs(source, cw: int, th: int, k: float):
+def _tall_specs(source, cw: int, th: int, k: float, skip=None):
     """Placement specs (with measured tiles) for a vertical stack.
 
     ``k`` is a global size multiplier used to grow the elements so the stack
@@ -37,6 +78,8 @@ def _tall_specs(source, cw: int, th: int, k: float):
     """
     out = []
     for idx, el in _indexed(source):
+        if idx == skip:                      # drawn as the full-bleed band
+            continue
         if is_reflow_text(el):
             line_h = max(9, round(th * 0.045 * (el.priority / 70) * k))
             tile = tiles.text_tile(el, cw, line_h, align="center")
@@ -60,15 +103,17 @@ def plan_tall(source, tw: int, th: int) -> LayoutPlan:
     plan = LayoutPlan(tw, th, strategy="reflow-tall",
                       base_color=tiles.base_color(source.background))
 
+    h_idx, hero = _hero_band(source)
+    band_src = source.background if hero is None else hero.image
     band_h = max(24, round(0.20 * th))
-    band_tile = tiles.photo_band_tile(source.background, tw, band_h,
+    band_tile = tiles.photo_band_tile(band_src, tw, band_h,
                                       feather=0.0, focus_x=0.5, focus_y=0.5)
-    band = {"idx": None, "el": None, "tile": band_tile, "key": tiles.saliency_row(
-        source.background) * source.height, "bleed": True,
+    band = {"idx": h_idx, "el": hero, "tile": band_tile, "key": tiles.saliency_row(
+        band_src) * source.height, "bleed": True,
         "params": {"feather": 0.0, "focus_x": 0.5, "focus_y": 0.5}}
 
     def assemble(k):
-        items = _tall_specs(source, cw, th, k) + [band]
+        items = _tall_specs(source, cw, th, k, skip=h_idx) + [band]
         items.sort(key=lambda d: d["key"])
         return items
 
@@ -77,7 +122,8 @@ def plan_tall(source, tw: int, th: int) -> LayoutPlan:
 
     # Grow the elements so the stack fills the height, then back off until it fits.
     n = max(1, len(source.elements))
-    tot0 = sum(d["tile"].height for d in _tall_specs(source, cw, th, 1.0)) + gap * n
+    tot0 = sum(d["tile"].height
+               for d in _tall_specs(source, cw, th, 1.0, skip=h_idx)) + gap * n
     k = min(1.7, max(0.6, (avail * 0.97 - band_h) / max(1, tot0 - band_h)))
     items = assemble(k)
     for _ in range(6):
@@ -95,9 +141,9 @@ def plan_tall(source, tw: int, th: int) -> LayoutPlan:
         tile = d["tile"]
         x = 0 if d["bleed"] else (tw - tile.width) / 2
         if d["bleed"]:
-            plan.add(Placement(id="photo-band", kind="photo_band", x=x, y=y,
-                               w=tile.width, h=tile.height, lock_aspect=False,
-                               params=d["params"], tile=tile))
+            _band_placement(plan, source, d["idx"], d["el"], x=x, y=y,
+                            w=tile.width, h=tile.height,
+                            params=d["params"], tile=tile)
         else:
             el = d["el"]
             plan.add(Placement(id=_el_id(d["idx"], el), kind="element", x=x, y=y,
@@ -210,13 +256,19 @@ def plan_wide(source, tw: int, th: int) -> LayoutPlan:
     plan = LayoutPlan(tw, th, strategy="reflow-wide",
                       base_color=tiles.base_color(source.background))
 
-    # 1. Background imagery as a soft-edged central band, so text sits on clean
-    #    space while the photo still "scales across".
+    # 1. Imagery as a soft-edged central band, so text sits on clean space while
+    #    the photo still "scales across". A promoted hero is what the band shows
+    #    when there is one — that is the product artwork, and it earns the
+    #    centre; otherwise the band falls back to the backdrop.
+    # Unlike the tall stack, a wide banner flows its columns straight across the
+    # middle — so a hero drawn as a centre band is simply overdrawn by them. Here
+    # the hero earns a column of its own instead (see ``col_specs``), and the
+    # band stays what it always was: the backdrop.
     band_w = round(0.60 * tw)
-    focus_y = tiles.saliency_row(source.background)
     plan.add(Placement(id="photo-band", kind="photo_band", x=(tw - band_w) // 2,
                        y=0, w=band_w, h=th, lock_aspect=False,
-                       params={"feather": 0.22, "focus_x": 0.5, "focus_y": focus_y}))
+                       params={"feather": 0.22, "focus_x": 0.5,
+                               "focus_y": tiles.saliency_row(source.background)}))
 
     # 2. Reserve the bottom for the footer: a full-width logo bar plus the
     #    full-width disclaimer strip beneath it.
@@ -236,6 +288,12 @@ def plan_wide(source, tw: int, th: int) -> LayoutPlan:
             return [_text_spec(head, round(ch * 0.64), round(0.42 * tw)),
                     _text_spec(sub, round(ch * 0.30), round(0.40 * tw))]
         _, el = col[0]
+        if getattr(el, "is_hero", False):
+            # The hero is the composition's anchor: it spans the banner's full
+            # height rather than sitting inside the column region, and is allowed
+            # a wider slot than an incidental graphic.
+            return [{"tile": tiles.fit(el.image, 0.30 * tw, th),
+                     "params": {"mode": "stretch", "bleed_y": True}}]
         if is_reflow_text(el):
             return [_text_spec(el, ch, round(0.30 * tw))]
         return [_graphic_spec(el, tw, ch)]
@@ -249,7 +307,24 @@ def plan_wide(source, tw: int, th: int) -> LayoutPlan:
     avail = tw - 2 * mx
     n_gap = gap * (len(rendered) - 1)
     total = sum(col_w(s) for s in rendered)
-    if total + n_gap > avail:                    # overflow: shrink columns to fit
+
+    if total + n_gap > avail:
+        # Take the overflow out of the graphics first. A photo or a badge loses
+        # width gracefully, whereas text stops being readable — so shrinking
+        # every column by the same factor is precisely what drives small type
+        # under the legibility floor.
+        elastic = [i for i, specs in enumerate(rendered)
+                   if all(s["params"].get("mode") != "reflow" for s in specs)]
+        el_w = sum(col_w(rendered[i]) for i in elastic)
+        over = total + n_gap - avail
+        if elastic and el_w - over >= MIN_GRAPHIC_W * len(elastic):
+            g = max(GRAPHIC_MIN_SCALE, (el_w - over) / max(1, el_w))
+            for i in elastic:
+                rendered[i] = [_scale_spec(s, cols[i][j][1], g)
+                               for j, s in enumerate(rendered[i])]
+            total = sum(col_w(s) for s in rendered)
+
+    if total + n_gap > avail:                    # still over: shrink everything
         f = max(0.3, (avail - n_gap) / max(1, total))
         rendered = [[_scale_spec(s, col[i][1], f) for i, s in enumerate(specs)]
                     for specs, col in zip(rendered, cols)]
@@ -265,6 +340,10 @@ def plan_wide(source, tw: int, th: int) -> LayoutPlan:
         y = max(0, (region_h - colh) / 2)        # vertically centred
         for (idx, el), spec in zip(col, specs):
             tile = spec["tile"]
+            # A full-height element ignores the column's vertical centring — it
+            # is meant to bleed past the footer region, not sit above it.
+            if spec["params"].get("bleed_y"):
+                y = (th - tile.height) / 2
             plan.add(Placement(id=_el_id(idx, el), kind="element",
                                x=x + (w - tile.width) / 2, y=y,
                                w=tile.width, h=tile.height, element=idx,

@@ -57,6 +57,8 @@ class Element:
     bbox: tuple[int, int, int, int]  # (l, t, r, b) on the source canvas
     is_type: bool = False        # backed by a PSD type layer (candidate for reflow)
     uid: str = ""                # stable identity — see `assign_uids`
+    is_hero: bool = False        # promoted out of a background group — the
+                                 # artwork the composition is built around
 
     @property
     def priority(self) -> int:
